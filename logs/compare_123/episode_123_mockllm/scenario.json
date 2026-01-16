@@ -1,0 +1,425 @@
+{
+  "seed": 123,
+  "tasks": [
+    {
+      "task_id": "T000",
+      "release": 26,
+      "duration": 7,
+      "windows": [
+        [
+          51,
+          65
+        ]
+      ],
+      "due": 66,
+      "priority": 0.57,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T001",
+      "release": 170,
+      "duration": 8,
+      "windows": [
+        [
+          188,
+          198
+        ]
+      ],
+      "due": 215,
+      "priority": 0.53,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T002",
+      "release": 125,
+      "duration": 5,
+      "windows": [
+        [
+          148,
+          156
+        ]
+      ],
+      "due": 175,
+      "priority": 0.56,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T003",
+      "release": 3,
+      "duration": 8,
+      "windows": [
+        [
+          30,
+          39
+        ],
+        [
+          62,
+          69
+        ],
+        [
+          98,
+          108
+        ]
+      ],
+      "due": 39,
+      "priority": 0.5,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T004",
+      "release": 220,
+      "duration": 12,
+      "windows": [
+        [
+          245,
+          266
+        ],
+        [
+          299,
+          306
+        ]
+      ],
+      "due": 275,
+      "priority": 0.54,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T005",
+      "release": 247,
+      "duration": 6,
+      "windows": [
+        [
+          268,
+          274
+        ],
+        [
+          311,
+          333
+        ],
+        [
+          368,
+          391
+        ]
+      ],
+      "due": 293,
+      "priority": 0.92,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T006",
+      "release": 248,
+      "duration": 11,
+      "windows": [
+        [
+          277,
+          294
+        ],
+        [
+          334,
+          341
+        ],
+        [
+          383,
+          394
+        ]
+      ],
+      "due": 296,
+      "priority": 0.94,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T007",
+      "release": 134,
+      "duration": 5,
+      "windows": [
+        [
+          154,
+          177
+        ],
+        [
+          207,
+          215
+        ]
+      ],
+      "due": 191,
+      "priority": 0.57,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T008",
+      "release": 172,
+      "duration": 3,
+      "windows": [
+        [
+          182,
+          199
+        ]
+      ],
+      "due": 210,
+      "priority": 1.0,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T009",
+      "release": 207,
+      "duration": 11,
+      "windows": [
+        [
+          224,
+          239
+        ],
+        [
+          271,
+          284
+        ],
+        [
+          294,
+          315
+        ]
+      ],
+      "due": 243,
+      "priority": 0.99,
+      "preferred_pad": null
+    }
+  ],
+  "pads": [
+    {
+      "pad_id": "PAD_A",
+      "unavailable": []
+    },
+    {
+      "pad_id": "PAD_B",
+      "unavailable": []
+    },
+    {
+      "pad_id": "PAD_C",
+      "unavailable": []
+    }
+  ],
+  "disturbance_timeline": [
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T000",
+      "params": {
+        "delta": 1,
+        "new_release": 27
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T003",
+      "params": {
+        "delta": -3,
+        "new_release": 0
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T004",
+      "params": {
+        "delta": -2,
+        "new_release": 218
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T005",
+      "params": {
+        "delta": -1,
+        "new_release": 246
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 9,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 11,
+        "affected_start": 9,
+        "affected_end": 20
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 17,
+      "target_id": null,
+      "params": {
+        "severity": "light",
+        "delete_ratio": 0.2,
+        "duration": 10,
+        "affected_start": 17,
+        "affected_end": 27
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 27,
+      "target_id": "T000",
+      "params": {
+        "multiplier": 0.9580946021559162,
+        "epsilon": -0.04190539784408372
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 126,
+      "target_id": "T002",
+      "params": {
+        "multiplier": 1.0865566443949979,
+        "epsilon": 0.08655664439499794
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 130,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 9,
+        "affected_start": 130,
+        "affected_end": 139
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 143,
+      "target_id": "T007",
+      "params": {
+        "multiplier": 1.039040589385276,
+        "epsilon": 0.03904058938527613
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 149,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 15,
+        "affected_start": 149,
+        "affected_end": 164
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 158,
+      "target_id": null,
+      "params": {
+        "severity": "light",
+        "delete_ratio": 0.2,
+        "duration": 14,
+        "affected_start": 158,
+        "affected_end": 172
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 180,
+      "target_id": "T008",
+      "params": {
+        "multiplier": 0.937414315243339,
+        "epsilon": -0.06258568475666103
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 197,
+      "target_id": null,
+      "params": {
+        "severity": "light",
+        "delete_ratio": 0.2,
+        "duration": 14,
+        "affected_start": 197,
+        "affected_end": 211
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 211,
+      "target_id": "T009",
+      "params": {
+        "multiplier": 0.9638386882191904,
+        "epsilon": -0.036161311780809606
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 224,
+      "target_id": "T004",
+      "params": {
+        "multiplier": 1.0717387240124756,
+        "epsilon": 0.07173872401247568
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 230,
+      "target_id": "PAD_A",
+      "params": {
+        "outage_start": 231,
+        "outage_end": 238
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 234,
+      "target_id": "PAD_B",
+      "params": {
+        "outage_start": 235,
+        "outage_end": 247
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 262,
+      "target_id": "PAD_C",
+      "params": {
+        "outage_start": 263,
+        "outage_end": 274
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 357,
+      "target_id": "PAD_B",
+      "params": {
+        "outage_start": 358,
+        "outage_end": 362
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 392,
+      "target_id": "PAD_B",
+      "params": {
+        "outage_start": 393,
+        "outage_end": 403
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 418,
+      "target_id": "PAD_B",
+      "params": {
+        "outage_start": 419,
+        "outage_end": 431
+      }
+    }
+  ],
+  "config_snapshot": {
+    "slot_minutes": 10,
+    "rolling_interval": 6,
+    "horizon_slots": 144,
+    "sim_total_slots": 432,
+    "num_tasks": 10,
+    "num_pads": 3
+  }
+}

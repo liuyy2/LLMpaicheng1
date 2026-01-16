@@ -1,0 +1,698 @@
+{
+  "seed": 42,
+  "tasks": [
+    {
+      "task_id": "T000",
+      "release": 57,
+      "duration": 3,
+      "windows": [
+        [
+          73,
+          86
+        ],
+        [
+          126,
+          136
+        ],
+        [
+          175,
+          184
+        ]
+      ],
+      "due": 103,
+      "priority": 0.36,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T001",
+      "release": 216,
+      "duration": 3,
+      "windows": [
+        [
+          226,
+          238
+        ]
+      ],
+      "due": 254,
+      "priority": 0.72,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T002",
+      "release": 101,
+      "duration": 11,
+      "windows": [
+        [
+          124,
+          144
+        ],
+        [
+          179,
+          193
+        ]
+      ],
+      "due": 144,
+      "priority": 0.83,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T003",
+      "release": 81,
+      "duration": 9,
+      "windows": [
+        [
+          103,
+          113
+        ],
+        [
+          136,
+          152
+        ]
+      ],
+      "due": 115,
+      "priority": 0.57,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T004",
+      "release": 183,
+      "duration": 8,
+      "windows": [
+        [
+          204,
+          211
+        ],
+        [
+          251,
+          271
+        ],
+        [
+          322,
+          331
+        ]
+      ],
+      "due": 223,
+      "priority": 0.36,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T005",
+      "release": 150,
+      "duration": 12,
+      "windows": [
+        [
+          173,
+          181
+        ],
+        [
+          227,
+          240
+        ]
+      ],
+      "due": 190,
+      "priority": 0.99,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T006",
+      "release": 119,
+      "duration": 4,
+      "windows": [
+        [
+          136,
+          156
+        ],
+        [
+          171,
+          188
+        ]
+      ],
+      "due": 167,
+      "priority": 0.55,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T007",
+      "release": 136,
+      "duration": 4,
+      "windows": [
+        [
+          150,
+          173
+        ],
+        [
+          185,
+          198
+        ],
+        [
+          234,
+          254
+        ]
+      ],
+      "due": 181,
+      "priority": 0.99,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T008",
+      "release": 112,
+      "duration": 8,
+      "windows": [
+        [
+          132,
+          139
+        ]
+      ],
+      "due": 149,
+      "priority": 0.58,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T009",
+      "release": 33,
+      "duration": 6,
+      "windows": [
+        [
+          54,
+          66
+        ],
+        [
+          96,
+          117
+        ],
+        [
+          122,
+          142
+        ]
+      ],
+      "due": 74,
+      "priority": 0.4,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T010",
+      "release": 134,
+      "duration": 12,
+      "windows": [
+        [
+          163,
+          180
+        ],
+        [
+          209,
+          219
+        ]
+      ],
+      "due": 195,
+      "priority": 0.36,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T011",
+      "release": 24,
+      "duration": 4,
+      "windows": [
+        [
+          38,
+          57
+        ]
+      ],
+      "due": 59,
+      "priority": 0.57,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T012",
+      "release": 239,
+      "duration": 11,
+      "windows": [
+        [
+          255,
+          264
+        ],
+        [
+          309,
+          332
+        ]
+      ],
+      "due": 272,
+      "priority": 0.84,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T013",
+      "release": 174,
+      "duration": 4,
+      "windows": [
+        [
+          196,
+          207
+        ],
+        [
+          256,
+          262
+        ]
+      ],
+      "due": 215,
+      "priority": 0.98,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T014",
+      "release": 91,
+      "duration": 11,
+      "windows": [
+        [
+          116,
+          138
+        ]
+      ],
+      "due": 144,
+      "priority": 0.41,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T015",
+      "release": 82,
+      "duration": 11,
+      "windows": [
+        [
+          98,
+          114
+        ],
+        [
+          131,
+          137
+        ],
+        [
+          214,
+          231
+        ]
+      ],
+      "due": 123,
+      "priority": 0.47,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T016",
+      "release": 123,
+      "duration": 12,
+      "windows": [
+        [
+          142,
+          163
+        ]
+      ],
+      "due": 165,
+      "priority": 0.98,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T017",
+      "release": 64,
+      "duration": 5,
+      "windows": [
+        [
+          89,
+          112
+        ],
+        [
+          135,
+          149
+        ],
+        [
+          209,
+          228
+        ]
+      ],
+      "due": 118,
+      "priority": 0.95,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T018",
+      "release": 102,
+      "duration": 7,
+      "windows": [
+        [
+          125,
+          145
+        ],
+        [
+          169,
+          191
+        ]
+      ],
+      "due": 148,
+      "priority": 0.47,
+      "preferred_pad": null
+    },
+    {
+      "task_id": "T019",
+      "release": 32,
+      "duration": 8,
+      "windows": [
+        [
+          52,
+          76
+        ]
+      ],
+      "due": 76,
+      "priority": 0.35,
+      "preferred_pad": null
+    }
+  ],
+  "pads": [
+    {
+      "pad_id": "PAD_A",
+      "unavailable": []
+    },
+    {
+      "pad_id": "PAD_B",
+      "unavailable": []
+    },
+    {
+      "pad_id": "PAD_C",
+      "unavailable": []
+    }
+  ],
+  "disturbance_timeline": [
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T000",
+      "params": {
+        "delta": 0,
+        "new_release": 57
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T002",
+      "params": {
+        "delta": -1,
+        "new_release": 100
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T003",
+      "params": {
+        "delta": -1,
+        "new_release": 80
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T008",
+      "params": {
+        "delta": 5,
+        "new_release": 117
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T009",
+      "params": {
+        "delta": 4,
+        "new_release": 37
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T016",
+      "params": {
+        "delta": -3,
+        "new_release": 120
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T017",
+      "params": {
+        "delta": 1,
+        "new_release": 65
+      }
+    },
+    {
+      "event_type": "release",
+      "trigger_time": 0,
+      "target_id": "T018",
+      "params": {
+        "delta": -2,
+        "new_release": 100
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 41,
+      "target_id": "T009",
+      "params": {
+        "multiplier": 0.8418805321152989,
+        "epsilon": -0.1581194678847011
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 62,
+      "target_id": "T000",
+      "params": {
+        "multiplier": 1.0155258832559637,
+        "epsilon": 0.015525883255963822
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 65,
+      "target_id": "T017",
+      "params": {
+        "multiplier": 0.9611695145331148,
+        "epsilon": -0.03883048546688516
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 84,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 17,
+        "affected_start": 84,
+        "affected_end": 101
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 98,
+      "target_id": "T014",
+      "params": {
+        "multiplier": 1.0288723776566808,
+        "epsilon": 0.028872377656680794
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 106,
+      "target_id": "T018",
+      "params": {
+        "multiplier": 0.942605917480856,
+        "epsilon": -0.05739408251914399
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 115,
+      "target_id": "PAD_C",
+      "params": {
+        "outage_start": 116,
+        "outage_end": 122
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 120,
+      "target_id": "T008",
+      "params": {
+        "multiplier": 0.9531682112612097,
+        "epsilon": -0.04683178873879035
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 141,
+      "target_id": "T007",
+      "params": {
+        "multiplier": 0.9459426333722489,
+        "epsilon": -0.05405736662775105
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 144,
+      "target_id": "T010",
+      "params": {
+        "multiplier": 0.8848940973575415,
+        "epsilon": -0.11510590264245846
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 148,
+      "target_id": null,
+      "params": {
+        "severity": "medium",
+        "delete_ratio": 0.4,
+        "duration": 8,
+        "affected_start": 148,
+        "affected_end": 156
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 153,
+      "target_id": "PAD_A",
+      "params": {
+        "outage_start": 154,
+        "outage_end": 162
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 157,
+      "target_id": "T005",
+      "params": {
+        "multiplier": 1.04970201845432,
+        "epsilon": 0.04970201845432006
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 166,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 13,
+        "affected_start": 166,
+        "affected_end": 179
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 179,
+      "target_id": "T013",
+      "params": {
+        "multiplier": 0.9096273293921253,
+        "epsilon": -0.09037267060787471
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 193,
+      "target_id": "T004",
+      "params": {
+        "multiplier": 1.1039551384587447,
+        "epsilon": 0.10395513845874481
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 205,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 17,
+        "affected_start": 205,
+        "affected_end": 222
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 220,
+      "target_id": "T001",
+      "params": {
+        "multiplier": 0.8744858513054523,
+        "epsilon": -0.1255141486945477
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 234,
+      "target_id": null,
+      "params": {
+        "severity": "medium",
+        "delete_ratio": 0.4,
+        "duration": 16,
+        "affected_start": 234,
+        "affected_end": 250
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 245,
+      "target_id": "PAD_A",
+      "params": {
+        "outage_start": 246,
+        "outage_end": 255
+      }
+    },
+    {
+      "event_type": "duration",
+      "trigger_time": 245,
+      "target_id": "T012",
+      "params": {
+        "multiplier": 1.0322487350996965,
+        "epsilon": 0.03224873509969646
+      }
+    },
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 271,
+      "target_id": "PAD_B",
+      "params": {
+        "outage_start": 272,
+        "outage_end": 277
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 365,
+      "target_id": null,
+      "params": {
+        "severity": "light",
+        "delete_ratio": 0.2,
+        "duration": 9,
+        "affected_start": 365,
+        "affected_end": 374
+      }
+    },
+    {
+      "event_type": "weather",
+      "trigger_time": 396,
+      "target_id": null,
+      "params": {
+        "severity": "heavy",
+        "delete_ratio": 0.6,
+        "duration": 16,
+        "affected_start": 396,
+        "affected_end": 412
+      }
+    }
+  ],
+  "config_snapshot": {
+    "slot_minutes": 10,
+    "rolling_interval": 6,
+    "horizon_slots": 144,
+    "sim_total_slots": 432,
+    "num_tasks": 20,
+    "num_pads": 3
+  }
+}

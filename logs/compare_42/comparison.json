@@ -1,0 +1,66 @@
+{
+  "seed": 42,
+  "timestamp": "2026-01-16 10:53:58",
+  "results": [
+    {
+      "policy_name": "fixed",
+      "completed": 20,
+      "total": 20,
+      "on_time_rate": 1.0,
+      "avg_delay": 0.0,
+      "max_delay": 0,
+      "episode_drift": 0.0089,
+      "total_shifts": 2,
+      "total_switches": 4,
+      "num_replans": 44,
+      "num_forced_replans": 1,
+      "avg_solve_time_ms": 14.7,
+      "total_runtime_s": 0.67
+    },
+    {
+      "policy_name": "nofreeze",
+      "completed": 20,
+      "total": 20,
+      "on_time_rate": 1.0,
+      "avg_delay": 0.0,
+      "max_delay": 0,
+      "episode_drift": 0.0089,
+      "total_shifts": 2,
+      "total_switches": 4,
+      "num_replans": 44,
+      "num_forced_replans": 1,
+      "avg_solve_time_ms": 14.6,
+      "total_runtime_s": 0.66
+    },
+    {
+      "policy_name": "greedy",
+      "completed": 19,
+      "total": 20,
+      "on_time_rate": 1.0,
+      "avg_delay": 0.0,
+      "max_delay": 0,
+      "episode_drift": 0.001,
+      "total_shifts": 1,
+      "total_switches": 2,
+      "num_replans": 72,
+      "num_forced_replans": 2,
+      "avg_solve_time_ms": 0.0,
+      "total_runtime_s": 0.01
+    },
+    {
+      "policy_name": "mockllm",
+      "completed": 20,
+      "total": 20,
+      "on_time_rate": 1.0,
+      "avg_delay": 0.0,
+      "max_delay": 0,
+      "episode_drift": 0.0089,
+      "total_shifts": 2,
+      "total_switches": 4,
+      "num_replans": 44,
+      "num_forced_replans": 1,
+      "avg_solve_time_ms": 14.4,
+      "total_runtime_s": 0.67
+    }
+  ]
+}

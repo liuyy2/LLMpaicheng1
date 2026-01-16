@@ -1,0 +1,149 @@
+{
+  "seed": 42,
+  "policy": "mockllm",
+  "schedule": [
+    {
+      "task_id": "T011",
+      "pad_id": "PAD_A",
+      "start_slot": 34,
+      "launch_slot": 38
+    },
+    {
+      "task_id": "T019",
+      "pad_id": "PAD_A",
+      "start_slot": 44,
+      "launch_slot": 52
+    },
+    {
+      "task_id": "T009",
+      "pad_id": "PAD_A",
+      "start_slot": 53,
+      "launch_slot": 58
+    },
+    {
+      "task_id": "T000",
+      "pad_id": "PAD_C",
+      "start_slot": 70,
+      "launch_slot": 73
+    },
+    {
+      "task_id": "T017",
+      "pad_id": "PAD_A",
+      "start_slot": 91,
+      "launch_slot": 96
+    },
+    {
+      "task_id": "T015",
+      "pad_id": "PAD_B",
+      "start_slot": 89,
+      "launch_slot": 100
+    },
+    {
+      "task_id": "T003",
+      "pad_id": "PAD_A",
+      "start_slot": 100,
+      "launch_slot": 109
+    },
+    {
+      "task_id": "T014",
+      "pad_id": "PAD_A",
+      "start_slot": 109,
+      "launch_slot": 120
+    },
+    {
+      "task_id": "T002",
+      "pad_id": "PAD_B",
+      "start_slot": 113,
+      "launch_slot": 124
+    },
+    {
+      "task_id": "T018",
+      "pad_id": "PAD_A",
+      "start_slot": 120,
+      "launch_slot": 127
+    },
+    {
+      "task_id": "T008",
+      "pad_id": "PAD_A",
+      "start_slot": 127,
+      "launch_slot": 135
+    },
+    {
+      "task_id": "T016",
+      "pad_id": "PAD_A",
+      "start_slot": 135,
+      "launch_slot": 147
+    },
+    {
+      "task_id": "T006",
+      "pad_id": "PAD_A",
+      "start_slot": 147,
+      "launch_slot": 151
+    },
+    {
+      "task_id": "T007",
+      "pad_id": "PAD_A",
+      "start_slot": 163,
+      "launch_slot": 167
+    },
+    {
+      "task_id": "T010",
+      "pad_id": "PAD_B",
+      "start_slot": 152,
+      "launch_slot": 163
+    },
+    {
+      "task_id": "T005",
+      "pad_id": "PAD_A",
+      "start_slot": 167,
+      "launch_slot": 180
+    },
+    {
+      "task_id": "T013",
+      "pad_id": "PAD_A",
+      "start_slot": 192,
+      "launch_slot": 196
+    },
+    {
+      "task_id": "T004",
+      "pad_id": "PAD_A",
+      "start_slot": 195,
+      "launch_slot": 204
+    },
+    {
+      "task_id": "T001",
+      "pad_id": "PAD_B",
+      "start_slot": 223,
+      "launch_slot": 226
+    },
+    {
+      "task_id": "T012",
+      "pad_id": "PAD_B",
+      "start_slot": 244,
+      "launch_slot": 255
+    }
+  ],
+  "completed": [
+    "T005",
+    "T001",
+    "T006",
+    "T019",
+    "T018",
+    "T000",
+    "T015",
+    "T011",
+    "T017",
+    "T012",
+    "T013",
+    "T002",
+    "T007",
+    "T004",
+    "T010",
+    "T003",
+    "T016",
+    "T008",
+    "T009",
+    "T014"
+  ],
+  "uncompleted": []
+}
