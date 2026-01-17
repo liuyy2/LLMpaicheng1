@@ -312,10 +312,10 @@ Seeds 划分:
 
 ```
 网格搜索:
-  - w_delay ∈ [1, 5, 10, 20, 50]
-  - w_shift ∈ [0.1, 0.5, 1, 2, 5]
-  - w_switch ∈ [1, 2, 5, 10, 20]
-  - FREEZE_HORIZON ∈ [0, 6, 12, 18, 24]
+  - w_delay ∈ [5, 10, 20, 50]
+  - w_shift ∈ [0, 0.2, 1, 2]
+  - w_switch ∈ [0, 60, 180, 600]
+  - FREEZE_HORIZON ∈ [0, 2, 6, 12] (小时)
 
 评估指标: avg_delay + λ * episode_drift, λ=5
 ```
@@ -421,6 +421,7 @@ python analyze.py --input results/ --output figures/ --show
 ├─────────────────────────────────────────────────────────────────┤
 │  2. 网格搜索调参 (仅训练集)                                       │
 │     - freeze_horizon_hours: [0, 2, 6, 12]                       │
+│     - w_delay: [5, 10, 20, 50]                                  │
 │     - w_shift: [0, 0.2, 1, 2]                                   │
 │     - w_switch: [0, 60, 180, 600]                               │
 │     - 综合目标: avg_delay + 5.0 × episode_drift                 │

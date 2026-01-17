@@ -1,3 +1,0 @@
-freeze_horizon_slots,w_delay,w_shift,w_switch,avg_delay,avg_drift,combined_score,num_episodes,avg_solve_time_ms
-0,10.0,0.0,0,0.0,0.04740662495876307,0.23703312479381536,3,14.818079477653946
-36,10.0,0.0,0,0.0,0.04713109809074462,0.2356554904537231,3,14.53377719882279

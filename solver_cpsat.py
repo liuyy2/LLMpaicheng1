@@ -392,10 +392,18 @@ def _solve_with_config(
         for ua_idx, (ua_start, ua_end) in enumerate(pad.unavailable):
             ua_duration = ua_end - ua_start + 1
             # 创建一个固定的不可用区间
-            # Note: OR-Tools 9.10+ 使用 NewFixedSizeIntervalVar (无 "d")
-            unavail_interval = model.NewFixedSizeIntervalVar(
-                ua_start, ua_duration, f"unavail_{p_idx}_{ua_idx}"
-            )
+            # Note: OR-Tools 9.9 使用 NewFixedSizedIntervalVar (有 "d")
+            #       OR-Tools 9.10+ 使用 NewFixedSizeIntervalVar (无 "d")
+            try:
+                # 尝试 9.9 版本的 API（有 "d"）
+                unavail_interval = model.NewFixedSizedIntervalVar(
+                    ua_start, ua_duration, f"unavail_{p_idx}_{ua_idx}"
+                )
+            except AttributeError:
+                # 回退到 9.10+ 版本的 API（无 "d"）
+                unavail_interval = model.NewFixedSizeIntervalVar(
+                    ua_start, ua_duration, f"unavail_{p_idx}_{ua_idx}"
+                )
             pad_intervals.append(unavail_interval)
         
         # 重新添加 NoOverlap（包含不可用区间）

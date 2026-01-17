@@ -50,6 +50,7 @@ class ExperimentConfig:
     
     # 调参网格
     freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 2, 6, 12])
+    w_delay_values: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 50.0])
     w_shift_values: List[float] = field(default_factory=lambda: [0.0, 0.2, 1.0, 2.0])
     w_switch_values: List[float] = field(default_factory=lambda: [0, 60, 180, 600])
     trigger_window_loss_pct: List[float] = field(default_factory=lambda: [0.1, 0.25, 0.4])
@@ -306,6 +307,7 @@ def grid_search_tuning(
     
     param_grid = list(itertools.product(
         freeze_slots,
+        exp_config.w_delay_values,
         exp_config.w_shift_values,
         exp_config.w_switch_values
     ))
@@ -320,10 +322,10 @@ def grid_search_tuning(
     
     total_combos = len(param_grid)
     
-    for combo_idx, (freeze_h, w_shift, w_switch) in enumerate(param_grid):
+    for combo_idx, (freeze_h, w_delay, w_shift, w_switch) in enumerate(param_grid):
         if verbose:
             print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, "
-                  f"w_shift={w_shift}, w_switch={w_switch}")
+                  f"w_delay={w_delay}, w_shift={w_shift}, w_switch={w_switch}")
         
         # 运行所有训练 episodes
         delays = []
@@ -331,7 +333,7 @@ def grid_search_tuning(
         solve_times = []
         
         policy_params = {
-            "w_delay": 10.0,  # 固定
+            "w_delay": w_delay,
             "w_shift": w_shift,
             "w_switch": w_switch,
             "freeze_horizon": freeze_h
@@ -366,7 +368,7 @@ def grid_search_tuning(
         
         result = TuningResult(
             freeze_horizon_slots=freeze_h,
-            w_delay=10.0,
+            w_delay=w_delay,
             w_shift=w_shift,
             w_switch=w_switch,
             avg_delay=avg_delay,
@@ -385,7 +387,7 @@ def grid_search_tuning(
         if combined < best_score:
             best_score = combined
             best_params = {
-                "w_delay": 10.0,
+                "w_delay": w_delay,
                 "w_shift": w_shift,
                 "w_switch": w_switch,
                 "freeze_horizon": freeze_h
@@ -741,9 +743,10 @@ def main():
     # 快速模式下减少调参组合
     if args.quick:
         exp_config.freeze_horizon_hours = [0, 6]  # 2 instead of 4
+        exp_config.w_delay_values = [5.0, 20.0]   # 2 instead of 4
         exp_config.w_shift_values = [0.0, 1.0]    # 2 instead of 4
         exp_config.w_switch_values = [0, 180]     # 2 instead of 4
-        print("  调参网格缩减为 2×2×2=8 组合")
+        print("  调参网格缩减为 2×2×2×2=16 组合")
     
     # 运行
     run_full_experiment(exp_config, verbose=args.verbose or args.quick)

@@ -176,13 +176,15 @@ python run_experiments.py \
 ### 4.3 网格搜索参数空间
 
 ```python
-# 完整参数网格 (64 组合)
+# 完整参数网格 (256 组合)
 freeze_horizon_hours = [0, 2, 6, 12]     # 4 值
+w_delay_values = [5.0, 10.0, 20.0, 50.0] # 4 值
 w_shift_values = [0.0, 0.2, 1.0, 2.0]    # 4 值
 w_switch_values = [0, 60, 180, 600]      # 4 值
 
-# 快速模式网格 (8 组合)
+# 快速模式网格 (16 组合)
 freeze_horizon_hours = [0, 6]            # 2 值
+w_delay_values = [5.0, 20.0]             # 2 值
 w_shift_values = [0.0, 1.0]              # 2 值
 w_switch_values = [0, 180]               # 2 值
 ```
