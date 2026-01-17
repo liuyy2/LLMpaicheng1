@@ -302,8 +302,14 @@ def plot_replans_distribution(
             continue
         policy_data[rec.policy_name].append(rec.num_replans)
     
-    # 排序策略
-    policy_names = sorted(policy_data.keys())
+    # 过滤空数据的策略
+    policy_names = sorted([p for p in policy_data.keys() if len(policy_data[p]) > 0])
+    
+    if len(policy_names) == 0:
+        print(f"警告: {dataset} 数据集没有找到任何策略数据，跳过绘制 {output_path}")
+        plt.close()
+        return
+    
     data = [policy_data[p] for p in policy_names]
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
@@ -343,7 +349,14 @@ def plot_switches_distribution(
             continue
         policy_data[rec.policy_name].append(rec.total_switches)
     
-    policy_names = sorted(policy_data.keys())
+    # 过滤空数据的策略
+    policy_names = sorted([p for p in policy_data.keys() if len(policy_data[p]) > 0])
+    
+    if len(policy_names) == 0:
+        print(f"警告: {dataset} 数据集没有找到任何策略数据，跳过绘制 {output_path}")
+        plt.close()
+        return
+    
     data = [policy_data[p] for p in policy_names]
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
@@ -749,12 +762,22 @@ def run_analysis(
     print(f"加载 {len(records)} episode 记录")
     print(f"加载 {len(tuning_results)} 调参结果")
     
+    # 检测可用的数据集
+    available_datasets = set(rec.dataset for rec in records)
+    print(f"可用数据集: {sorted(available_datasets)}")
+    
+    # 优先使用 test，如果没有则使用 train
+    primary_dataset = "test" if "test" in available_datasets else "train"
+    print(f"使用数据集绘图: {primary_dataset}")
+    
     # 2. 计算统计
     stats = compute_summary_stats(records, tuning_lambda)
     
     # 3. 打印汇总
-    print_summary_table(stats, "test")
-    print_summary_table(stats, "train")
+    if "test" in available_datasets:
+        print_summary_table(stats, "test")
+    if "train" in available_datasets:
+        print_summary_table(stats, "train")
     
     # 4. 保存增强汇总
     enhanced_summary_path = os.path.join(output_dir, "summary_with_tests.csv")
@@ -767,28 +790,28 @@ def run_analysis(
     plot_delay_vs_drift_scatter(
         records,
         os.path.join(output_dir, "delay_vs_drift_scatter.png"),
-        dataset="test"
+        dataset=primary_dataset
     )
     
     # 重排次数分布
     plot_replans_distribution(
         records,
         os.path.join(output_dir, "replans_distribution.png"),
-        dataset="test"
+        dataset=primary_dataset
     )
     
     # 切换次数分布
     plot_switches_distribution(
         records,
         os.path.join(output_dir, "switches_distribution.png"),
-        dataset="test"
+        dataset=primary_dataset
     )
     
     # 策略对比条形图
     plot_policy_comparison_bars(
         stats,
         os.path.join(output_dir, "policy_comparison_combined.png"),
-        dataset="test",
+        dataset=primary_dataset,
         metric="combined_mean",
         ylabel="Combined Score (delay + 5*drift)"
     )
@@ -796,7 +819,7 @@ def run_analysis(
     plot_policy_comparison_bars(
         stats,
         os.path.join(output_dir, "policy_comparison_delay.png"),
-        dataset="test",
+        dataset=primary_dataset,
         metric="delay_mean",
         ylabel="Average Delay (slots)"
     )
@@ -804,7 +827,7 @@ def run_analysis(
     plot_policy_comparison_bars(
         stats,
         os.path.join(output_dir, "policy_comparison_drift.png"),
-        dataset="test",
+        dataset=primary_dataset,
         metric="drift_mean",
         ylabel="Episode Plan Drift"
     )
@@ -815,7 +838,7 @@ def run_analysis(
         os.path.join(output_dir, "delay_by_disturbance.png"),
         metric="avg_delay",
         ylabel="Average Delay",
-        dataset="test"
+        dataset=primary_dataset
     )
     
     plot_metric_by_disturbance(
@@ -823,14 +846,14 @@ def run_analysis(
         os.path.join(output_dir, "drift_by_disturbance.png"),
         metric="episode_drift",
         ylabel="Episode Drift",
-        dataset="test"
+        dataset=primary_dataset
     )
     
     # 求解时间对比
     plot_solve_time_comparison(
         records,
         os.path.join(output_dir, "solve_time_comparison.png"),
-        dataset="test"
+        dataset=primary_dataset
     )
     
     # 调参热力图

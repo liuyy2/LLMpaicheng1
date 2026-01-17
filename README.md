@@ -391,6 +391,15 @@ python run_experiments.py --train-seeds 60 --test-seeds 60 --output results/
 # 快速测试模式 (18 episodes: 9 train + 9 test)
 python run_experiments.py --quick --output results_quick/
 
+# 【新增】分阶段执行 - 仅训练（调参）
+python run_experiments.py --mode train-only --train-seeds 60 --output results/
+
+# 【新增】分阶段执行 - 仅测试（评估）
+python run_experiments.py --mode test-only --test-seeds 60 --output results/
+
+# 【新增】测试阶段指定参数文件
+python run_experiments.py --mode test-only --test-seeds 60 --load-params results/best_params.json --output results/
+
 # 自定义参数
 python run_experiments.py --train-seeds 30 --test-seeds 30 \
                           --solver-timeout 15.0 \
@@ -408,7 +417,81 @@ python analyze.py --input results/ --output figures/ --show
 
 ## 9. 实验运行详细说明
 
-### 9.1 批量实验流程 (run_experiments.py)
+### 9.1 运行模式说明
+
+#### **模式 1: 完整流程 (--mode full, 默认)**
+
+```bash
+python run_experiments.py --train-seeds 60 --test-seeds 60 --output results/
+```
+
+一次性完成：
+1. 训练集调参（60 episodes × 256 组合 = 15,360 次仿真）
+2. 保存最优参数
+3. 测试集评估（60 episodes × 5 策略 = 300 次仿真）
+4. 训练集完整评估（60 episodes × 5 策略 = 300 次仿真）
+5. 生成所有结果文件
+
+**优点**: 一次性完成，无需手动操作  
+**缺点**: 耗时较长（~15,960 次仿真）
+
+---
+
+#### **模式 2: 分阶段执行（推荐用于大规模实验）**
+
+**阶段 1 - 训练调参 (--mode train-only)**
+
+```bash
+python run_experiments.py --mode train-only --train-seeds 60 --output results/
+```
+
+执行内容：
+- ✅ 网格搜索 256 组参数
+- ✅ 保存 `best_params.json`
+- ✅ 保存 `tuning_results.csv`
+- ✅ 生成训练集的 `results_per_episode.csv` 和 `summary.csv`
+
+输出文件：
+```
+results/
+├── best_params.json          # 最优参数 ⭐
+├── tuning_results.csv        # 所有 256 组合的结果
+├── results_per_episode.csv   # 训练集每个 episode 详细指标
+└── summary.csv               # 训练集汇总统计
+```
+
+**阶段 2 - 测试评估 (--mode test-only)**
+
+```bash
+python run_experiments.py --mode test-only --test-seeds 60 --output results/
+```
+
+执行内容：
+- ✅ 自动加载 `results/best_params.json`
+- ✅ 在测试集上评估 5 个策略
+- ✅ 合并训练集和测试集数据
+- ✅ 更新 `results_per_episode.csv` 和 `summary.csv`
+
+**优点**: 
+- 可以在不同时间执行（例如训练在白天，测试在夜间）
+- 可以修改测试集大小而无需重新调参
+- 可以使用不同的硬件资源
+
+---
+
+#### **模式 3: 指定参数文件测试**
+
+如果你想使用自定义参数或其他训练结果：
+
+```bash
+python run_experiments.py --mode test-only --test-seeds 60 \
+                          --load-params /path/to/custom_params.json \
+                          --output results_custom/
+```
+
+---
+
+### 9.2 批量实验流程 (完整流程)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -428,7 +511,8 @@ python analyze.py --input results/ --output figures/ --show
 │     → 选出最优参数 → fixed_tuned 策略                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  3. 测试集配对评估                                                │
-│     - 策略列表: fixed_tuned, fixed_default, nofreeze, greedy    │
+│     - 策略列表: fixed_tuned, fixed_default, nofreeze, greedy,   │
+│                mockllm                                           │
 │     - 同一 seed 运行所有策略，保证配对公平性                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  4. 输出文件                                                     │
@@ -439,7 +523,58 @@ python analyze.py --input results/ --output figures/ --show
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.2 扰动强度定义
+### 9.3 分阶段执行示例
+
+**场景：大规模实验，需要分开执行**
+
+```bash
+# 第一步：训练阶段（耗时较长，可在服务器上运行）
+python run_experiments.py --mode train-only \
+                          --train-seeds 60 \
+                          --workers 8 \
+                          --output results/
+
+# 输出: results/best_params.json (例如：w_delay=20, w_shift=1.0, w_switch=180, freeze_horizon=12)
+
+# 第二步：测试阶段（可在本地或不同时间运行）
+python run_experiments.py --mode test-only \
+                          --test-seeds 60 \
+                          --workers 8 \
+                          --output results/
+
+# 第三步：生成图表分析
+python analyze.py --input results/ --output figures/
+```
+
+**场景：使用不同的测试集大小**
+
+```bash
+# 训练一次
+python run_experiments.py --mode train-only --train-seeds 60 --output results/
+
+# 小规模测试
+python run_experiments.py --mode test-only --test-seeds 30 --output results_test30/
+
+# 大规模测试
+python run_experiments.py --mode test-only --test-seeds 120 --output results_test120/
+```
+
+**场景：使用自定义参数跳过调参**
+
+```bash
+# 手动创建 custom_params.json
+echo '{"w_delay": 15.0, "w_shift": 0.5, "w_switch": 100, "freeze_horizon": 18}' > custom_params.json
+
+# 直接在测试集上评估
+python run_experiments.py --mode test-only \
+                          --test-seeds 60 \
+                          --load-params custom_params.json \
+                          --output results_custom/
+```
+
+---
+
+### 9.4 扰动强度定义
 
 | 级别 | p_weather | p_pad_outage | σ_duration | σ_release |
 |------|-----------|--------------|------------|-----------|
@@ -447,7 +582,7 @@ python analyze.py --input results/ --output figures/ --show
 | medium | 0.02 | 0.01 | 0.1 | 2.0 slots |
 | heavy | 0.04 | 0.02 | 0.15 | 3.0 slots |
 
-### 9.3 分析脚本 (analyze.py)
+### 9.5 分析脚本 (analyze.py)
 
 生成图表：
 - `delay_vs_drift_scatter.png`: Delay × PlanDrift 散点图
