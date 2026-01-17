@@ -1,6 +1,6 @@
 {
   "seed": 42,
-  "policy": "nofreeze",
+  "policy": "qwen3",
   "schedule": [
     {
       "task_id": "T011",
@@ -17,49 +17,43 @@
     {
       "task_id": "T009",
       "pad_id": "PAD_A",
-      "start_slot": 53,
-      "launch_slot": 58
+      "start_slot": 49,
+      "launch_slot": 54
     },
     {
       "task_id": "T000",
-      "pad_id": "PAD_C",
+      "pad_id": "PAD_A",
       "start_slot": 70,
       "launch_slot": 73
     },
     {
-      "task_id": "T017",
-      "pad_id": "PAD_A",
-      "start_slot": 91,
-      "launch_slot": 96
-    },
-    {
       "task_id": "T015",
-      "pad_id": "PAD_B",
+      "pad_id": "PAD_A",
       "start_slot": 89,
       "launch_slot": 100
     },
     {
+      "task_id": "T017",
+      "pad_id": "PAD_B",
+      "start_slot": 91,
+      "launch_slot": 96
+    },
+    {
       "task_id": "T003",
-      "pad_id": "PAD_A",
-      "start_slot": 100,
-      "launch_slot": 109
+      "pad_id": "PAD_C",
+      "start_slot": 94,
+      "launch_slot": 103
     },
     {
       "task_id": "T014",
       "pad_id": "PAD_A",
-      "start_slot": 109,
-      "launch_slot": 120
+      "start_slot": 105,
+      "launch_slot": 116
     },
     {
       "task_id": "T002",
-      "pad_id": "PAD_B",
-      "start_slot": 113,
-      "launch_slot": 124
-    },
-    {
-      "task_id": "T018",
       "pad_id": "PAD_A",
-      "start_slot": 120,
+      "start_slot": 116,
       "launch_slot": 127
     },
     {
@@ -69,34 +63,40 @@
       "launch_slot": 135
     },
     {
-      "task_id": "T016",
+      "task_id": "T018",
       "pad_id": "PAD_A",
       "start_slot": 135,
-      "launch_slot": 147
+      "launch_slot": 142
     },
     {
       "task_id": "T006",
       "pad_id": "PAD_A",
-      "start_slot": 147,
-      "launch_slot": 151
+      "start_slot": 142,
+      "launch_slot": 146
     },
     {
       "task_id": "T007",
-      "pad_id": "PAD_A",
-      "start_slot": 163,
-      "launch_slot": 167
+      "pad_id": "PAD_C",
+      "start_slot": 158,
+      "launch_slot": 162
+    },
+    {
+      "task_id": "T016",
+      "pad_id": "PAD_C",
+      "start_slot": 146,
+      "launch_slot": 158
     },
     {
       "task_id": "T010",
-      "pad_id": "PAD_B",
-      "start_slot": 152,
-      "launch_slot": 163
+      "pad_id": "PAD_A",
+      "start_slot": 163,
+      "launch_slot": 174
     },
     {
       "task_id": "T005",
-      "pad_id": "PAD_A",
-      "start_slot": 167,
-      "launch_slot": 180
+      "pad_id": "PAD_B",
+      "start_slot": 160,
+      "launch_slot": 173
     },
     {
       "task_id": "T013",
@@ -112,7 +112,7 @@
     },
     {
       "task_id": "T001",
-      "pad_id": "PAD_B",
+      "pad_id": "PAD_A",
       "start_slot": 223,
       "launch_slot": 226
     },

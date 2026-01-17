@@ -25,6 +25,7 @@ from policies import (
     NoFreezePolicy,
     GreedyPolicy,
     MockLLMPolicy,
+    LLMInterfacePolicy,
     create_policy
 )
 
@@ -110,7 +111,16 @@ def run_policy_comparison(
         MockLLMPolicy(
             policy_name="mockllm",
             enable_logging=True
-        )
+        ),
+        # 真实 LLM 策略（需配置 API Key）
+        LLMInterfacePolicy(
+            api_endpoint="https://api-inference.modelscope.cn/v1",
+            api_key="",  # 替换为实际密钥
+            model_name="Qwen/Qwen3-32B",
+            temperature=0.0,
+            enable=True,
+            policy_name="qwen3"
+        ),
     ]
     
     # 3. 运行各策略

@@ -19,6 +19,12 @@ from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
+try:
+    from openai import OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
 from policies.base import BasePolicy, MetaParams
 from disturbance import SimulationState
 from config import Config
@@ -591,19 +597,45 @@ class LLMInterfacePolicy(BasePolicy):
     
     def _call_llm(self, features: StateFeatures) -> str:
         """
-        调用 LLM API（预留实现）
+        调用 ModelScope Qwen3-32B API
         
-        实际使用时需要：
-        1. 构建 prompt
-        2. 调用 API
-        3. 解析响应
+        使用 OpenAI 兼容接口调用 ModelScope
         """
-        # 预留实现 - 实际调用时需要实现
-        raise NotImplementedError(
-            "LLM API 调用未实现。请：\n"
-            "1. 实现 _call_llm 方法\n"
-            "2. 或使用 MockLLMPolicy 进行确定性测试"
+        if not HAS_OPENAI:
+            raise ImportError("需要安装 openai 库: pip install openai")
+        
+        # 构建 prompt
+        prompt = self._build_prompt(features)
+        
+        # 创建 OpenAI 兼容客户端
+        client = OpenAI(
+            api_key=self._api_key,
+            base_url=self._api_endpoint or "https://api-inference.modelscope.cn/v1"
         )
+        
+        # 调用 API
+        # Qwen3 模型在非流式调用时必须关闭 enable_thinking
+        response = client.chat.completions.create(
+            model=self._model_name,
+            messages=[
+                {"role": "system", "content": "你是一个火箭发射排程优化助手，只输出 JSON 格式的元参数。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=self._temperature,
+            max_tokens=256,
+            extra_body={"enable_thinking": False}  # Qwen3 必需参数
+        )
+        
+        # 提取响应内容
+        raw_output = response.choices[0].message.content.strip()
+        
+        # 尝试提取 JSON（处理可能的 markdown 代码块）
+        if "```json" in raw_output:
+            raw_output = raw_output.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_output:
+            raw_output = raw_output.split("```")[1].split("```")[0].strip()
+        
+        return raw_output
     
     def _build_prompt(self, features: StateFeatures) -> str:
         """构建 prompt（预留）"""

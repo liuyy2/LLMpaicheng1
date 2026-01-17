@@ -1,6 +1,6 @@
 {
   "seed": 42,
-  "timestamp": "2026-01-16 10:53:58",
+  "timestamp": "2026-01-17 19:40:00",
   "results": [
     {
       "policy_name": "fixed",
@@ -14,8 +14,8 @@
       "total_switches": 4,
       "num_replans": 44,
       "num_forced_replans": 1,
-      "avg_solve_time_ms": 14.7,
-      "total_runtime_s": 0.67
+      "avg_solve_time_ms": 14.8,
+      "total_runtime_s": 0.68
     },
     {
       "policy_name": "nofreeze",
@@ -29,8 +29,8 @@
       "total_switches": 4,
       "num_replans": 44,
       "num_forced_replans": 1,
-      "avg_solve_time_ms": 14.6,
-      "total_runtime_s": 0.66
+      "avg_solve_time_ms": 14.2,
+      "total_runtime_s": 0.65
     },
     {
       "policy_name": "greedy",
@@ -59,8 +59,23 @@
       "total_switches": 4,
       "num_replans": 44,
       "num_forced_replans": 1,
-      "avg_solve_time_ms": 14.4,
-      "total_runtime_s": 0.67
+      "avg_solve_time_ms": 14.8,
+      "total_runtime_s": 0.68
+    },
+    {
+      "policy_name": "qwen3",
+      "completed": 20,
+      "total": 20,
+      "on_time_rate": 1.0,
+      "avg_delay": 0.0,
+      "max_delay": 0,
+      "episode_drift": 0.0497,
+      "total_shifts": 63,
+      "total_switches": 70,
+      "num_replans": 44,
+      "num_forced_replans": 2,
+      "avg_solve_time_ms": 15.2,
+      "total_runtime_s": 96.2
     }
   ]
 }
