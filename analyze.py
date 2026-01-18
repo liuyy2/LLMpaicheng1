@@ -4,13 +4,18 @@
 分析与绘图脚本 - 读取实验结果 CSV，计算统计，生成图表
 
 功能：
-1. 读取 results_per_episode.csv
-2. 计算汇总统计（均值、95% CI、配对 t 检验）
+1. 读取 results_per_episode.csv（含 LLM 相关字段）
+2. 输出 summary.csv 包含：
+   - mean_delay, CI_delay, mean_drift, CI_drift
+   - mean_replans, mean_switch
+   - mean_solver_time_ms, mean_wall_time_ms
+   - fallback_rate, cache_hit_rate
+   - mean_llm_time_ms, mean_llm_total_tokens
 3. 生成图表：
    - Delay vs PlanDrift scatter
-   - 重排次数分布
-   - 切换次数分布
-   - 各策略对比条形图
+   - 重排次数/切换次数分布
+   - LLM time vs Solver time 对比
+4. 对 llm_real 策略输出 reliability_report.md
 
 用法：
     python analyze.py --input results/ --output figures/
@@ -23,42 +28,65 @@ import json
 import os
 import math
 from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from collections import defaultdict
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
 # ============================================================================
-# 数据加载
+# 数据结构
 # ============================================================================
 
 @dataclass
 class EpisodeRecord:
-    """单 episode 记录"""
+    """单 episode 记录（支持 LLM 字段）"""
     seed: int
     disturbance_level: str
     policy_name: str
     dataset: str
+    
+    # 核心指标
     completed: int
     total: int
     on_time_rate: float
     avg_delay: float
     max_delay: int
     episode_drift: float
+    
+    # 稳定性
     total_shifts: int
     total_switches: int
     num_replans: int
     num_forced_replans: int
+    
+    # 性能
     avg_solve_time_ms: float
     total_runtime_s: float
+    
+    # LLM 相关字段（可选，旧版 CSV 可能不包含）
+    llm_calls: int = 0
+    llm_time_total_ms: int = 0
+    llm_latency_total_ms: int = 0
+    llm_prompt_tokens: int = 0
+    llm_completion_tokens: int = 0
+    llm_total_tokens: int = 0
+    llm_cache_hit_rate: float = 0.0
+    llm_fallback_count: int = 0
+    solver_time_total_ms: int = 0
+    wall_time_total_ms: int = 0
 
+
+# ============================================================================
+# 数据加载
+# ============================================================================
 
 def load_episode_results(filepath: str) -> List[EpisodeRecord]:
-    """加载 episode 结果 CSV"""
+    """加载 episode 结果 CSV（兼容新旧格式）"""
     records = []
     
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -80,7 +108,18 @@ def load_episode_results(filepath: str) -> List[EpisodeRecord]:
                 num_replans=int(row['num_replans']),
                 num_forced_replans=int(row['num_forced_replans']),
                 avg_solve_time_ms=float(row['avg_solve_time_ms']),
-                total_runtime_s=float(row['total_runtime_s'])
+                total_runtime_s=float(row['total_runtime_s']),
+                # LLM 字段（兼容旧版 CSV）
+                llm_calls=int(row.get('llm_calls', 0)),
+                llm_time_total_ms=int(row.get('llm_time_total_ms', 0)),
+                llm_latency_total_ms=int(row.get('llm_latency_total_ms', 0)),
+                llm_prompt_tokens=int(row.get('llm_prompt_tokens', 0)),
+                llm_completion_tokens=int(row.get('llm_completion_tokens', 0)),
+                llm_total_tokens=int(row.get('llm_total_tokens', 0)),
+                llm_cache_hit_rate=float(row.get('llm_cache_hit_rate', 0.0)),
+                llm_fallback_count=int(row.get('llm_fallback_count', 0)),
+                solver_time_total_ms=int(row.get('solver_time_total_ms', 0)),
+                wall_time_total_ms=int(row.get('wall_time_total_ms', 0))
             ))
     
     return records
@@ -131,6 +170,19 @@ def ci95(values: List[float]) -> float:
     return 1.96 * std(values) / math.sqrt(len(values))
 
 
+def percentile(values: List[float], p: float) -> float:
+    """计算百分位数"""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    k = (len(sorted_vals) - 1) * p / 100
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_vals[int(k)]
+    return sorted_vals[int(f)] * (c - k) + sorted_vals[int(c)] * (k - f)
+
+
 def paired_t_test(values1: List[float], values2: List[float]) -> Tuple[float, float]:
     """
     配对 t 检验
@@ -153,7 +205,6 @@ def paired_t_test(values1: List[float], values2: List[float]) -> Tuple[float, fl
     t_stat = d_bar / (s_d / math.sqrt(n))
     
     # 简化 p 值计算（使用正态近似）
-    # 对于 n > 30，t 分布近似正态
     p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(t_stat) / math.sqrt(2))))
     
     return t_stat, p_value
@@ -162,9 +213,9 @@ def paired_t_test(values1: List[float], values2: List[float]) -> Tuple[float, fl
 def compute_summary_stats(
     records: List[EpisodeRecord],
     tuning_lambda: float = 5.0
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """
-    计算汇总统计
+    计算汇总统计（含 LLM 指标）
     
     Returns:
         {(dataset, policy_name): {metric: value, ...}}
@@ -179,13 +230,36 @@ def compute_summary_stats(
     for key, recs in groups.items():
         dataset, policy_name = key
         
+        # 核心指标
         delays = [r.avg_delay for r in recs]
         drifts = [r.episode_drift for r in recs]
         on_times = [r.on_time_rate for r in recs]
         shifts = [r.total_shifts for r in recs]
         switches = [r.total_switches for r in recs]
         replans = [r.num_replans for r in recs]
+        
+        # 时间指标
         solve_times = [r.avg_solve_time_ms for r in recs]
+        solver_total_times = [r.solver_time_total_ms for r in recs]
+        wall_times = [r.wall_time_total_ms for r in recs]
+        
+        # LLM 指标
+        llm_calls = [r.llm_calls for r in recs]
+        llm_times = [r.llm_time_total_ms for r in recs]
+        llm_tokens = [r.llm_total_tokens for r in recs]
+        llm_fallbacks = [r.llm_fallback_count for r in recs]
+        llm_cache_hits = [r.llm_cache_hit_rate for r in recs]
+        
+        # 计算 fallback_rate = sum(fallback_count) / sum(calls)
+        total_calls = sum(llm_calls)
+        total_fallbacks = sum(llm_fallbacks)
+        fallback_rate = total_fallbacks / total_calls if total_calls > 0 else 0.0
+        
+        # 平均 cache_hit_rate（加权平均）
+        weighted_cache_hit = sum(
+            r.llm_cache_hit_rate * r.llm_calls for r in recs
+        )
+        avg_cache_hit_rate = weighted_cache_hit / total_calls if total_calls > 0 else 0.0
         
         combined = [d + tuning_lambda * dr for d, dr in zip(delays, drifts)]
         
@@ -193,35 +267,50 @@ def compute_summary_stats(
             "dataset": dataset,
             "policy_name": policy_name,
             "n": len(recs),
-            "delay_mean": mean(delays),
-            "delay_std": std(delays),
-            "delay_ci95": ci95(delays),
-            "drift_mean": mean(drifts),
-            "drift_std": std(drifts),
-            "drift_ci95": ci95(drifts),
+            
+            # 核心指标
+            "mean_delay": mean(delays),
+            "CI_delay": ci95(delays),
+            "mean_drift": mean(drifts),
+            "CI_drift": ci95(drifts),
             "combined_mean": mean(combined),
             "combined_ci95": ci95(combined),
             "on_time_mean": mean(on_times),
-            "shifts_mean": mean(shifts),
-            "switches_mean": mean(switches),
-            "replans_mean": mean(replans),
-            "solve_time_mean": mean(solve_times)
+            
+            # 稳定性
+            "mean_replans": mean(replans),
+            "mean_switch": mean(switches),
+            "mean_shifts": mean(shifts),
+            
+            # 时间
+            "mean_solver_time_ms": mean(solve_times),
+            "mean_solver_total_ms": mean(solver_total_times),
+            "mean_wall_time_ms": mean(wall_times),
+            
+            # LLM 指标
+            "mean_llm_calls": mean(llm_calls),
+            "mean_llm_time_ms": mean(llm_times),
+            "mean_llm_total_tokens": mean(llm_tokens),
+            "fallback_rate": fallback_rate,
+            "cache_hit_rate": avg_cache_hit_rate,
+            "total_llm_calls": total_calls,
+            "total_fallbacks": total_fallbacks
         }
     
     return stats
 
 
 # ============================================================================
-# 绘图函数
+# 绘图样式配置
 # ============================================================================
 
-# 策略颜色和标记配置
 POLICY_STYLES = {
     "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Fixed (Tuned)"},
     "fixed_default": {"color": "#3498db", "marker": "s", "label": "Fixed (Default)"},
     "nofreeze": {"color": "#e74c3c", "marker": "^", "label": "NoFreeze"},
     "greedy": {"color": "#9b59b6", "marker": "D", "label": "Greedy"},
     "mockllm": {"color": "#f39c12", "marker": "v", "label": "MockLLM"},
+    "llm_real": {"color": "#1abc9c", "marker": "P", "label": "LLM (Real)"},
     "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"}
 }
 
@@ -232,6 +321,10 @@ def get_policy_style(policy_name: str) -> dict:
         "color": "#7f8c8d", "marker": "x", "label": policy_name
     })
 
+
+# ============================================================================
+# 图表 1: Delay vs PlanDrift Scatter
+# ============================================================================
 
 def plot_delay_vs_drift_scatter(
     records: List[EpisodeRecord],
@@ -264,7 +357,7 @@ def plot_delay_vs_drift_scatter(
             marker=style["marker"],
             label=style["label"],
             alpha=0.7,
-            s=50,
+            s=60,
             edgecolors='white',
             linewidths=0.5
         )
@@ -286,46 +379,67 @@ def plot_delay_vs_drift_scatter(
     print(f"保存图表: {output_path}")
 
 
-def plot_replans_distribution(
+# ============================================================================
+# 图表 2: 重排/切换次数分布（箱线图）
+# ============================================================================
+
+def plot_replans_switches_boxplot(
     records: List[EpisodeRecord],
     output_path: str,
     dataset: str = "test"
 ):
-    """绘制重排次数分布图（箱线图）"""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """绘制重排次数和切换次数分布图（双子图箱线图）"""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     
     # 按策略分组
-    policy_data: Dict[str, List[int]] = defaultdict(list)
+    replan_data: Dict[str, List[int]] = defaultdict(list)
+    switch_data: Dict[str, List[int]] = defaultdict(list)
     
     for rec in records:
         if rec.dataset != dataset:
             continue
-        policy_data[rec.policy_name].append(rec.num_replans)
+        replan_data[rec.policy_name].append(rec.num_replans)
+        switch_data[rec.policy_name].append(rec.total_switches)
     
     # 过滤空数据的策略
-    policy_names = sorted([p for p in policy_data.keys() if len(policy_data[p]) > 0])
+    policy_names = sorted([p for p in replan_data.keys() if len(replan_data[p]) > 0])
     
     if len(policy_names) == 0:
         print(f"警告: {dataset} 数据集没有找到任何策略数据，跳过绘制 {output_path}")
         plt.close()
         return
     
-    data = [policy_data[p] for p in policy_names]
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
     
-    # 绘制箱线图
-    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    # 子图 1: 重排次数
+    ax1 = axes[0]
+    data1 = [replan_data[p] for p in policy_names]
+    bp1 = ax1.boxplot(data1, labels=labels, patch_artist=True)
     
-    for patch, color in zip(bp['boxes'], colors):
+    for patch, color in zip(bp1['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
     
-    ax.set_ylabel("Number of Replans", fontsize=12)
-    ax.set_title(f"Replan Count Distribution ({dataset} set)", fontsize=14)
-    ax.grid(True, axis='y', alpha=0.3)
+    ax1.set_ylabel("Number of Replans", fontsize=12)
+    ax1.set_title(f"Replan Count Distribution ({dataset} set)", fontsize=12)
+    ax1.grid(True, axis='y', alpha=0.3)
+    ax1.tick_params(axis='x', rotation=15)
     
-    plt.xticks(rotation=15)
+    # 子图 2: 切换次数
+    ax2 = axes[1]
+    data2 = [switch_data[p] for p in policy_names]
+    bp2 = ax2.boxplot(data2, labels=labels, patch_artist=True)
+    
+    for patch, color in zip(bp2['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    
+    ax2.set_ylabel("Number of Pad Switches", fontsize=12)
+    ax2.set_title(f"Pad Switch Count Distribution ({dataset} set)", fontsize=12)
+    ax2.grid(True, axis='y', alpha=0.3)
+    ax2.tick_params(axis='x', rotation=15)
+    
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -333,51 +447,113 @@ def plot_replans_distribution(
     print(f"保存图表: {output_path}")
 
 
-def plot_switches_distribution(
+# ============================================================================
+# 图表 3: LLM Time vs Solver Time
+# ============================================================================
+
+def plot_llm_vs_solver_time(
     records: List[EpisodeRecord],
     output_path: str,
     dataset: str = "test"
 ):
-    """绘制 Pad 切换次数分布图（箱线图）"""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """
+    绘制 LLM 时间 vs Solver 时间对比图
+    
+    使用分组条形图展示各策略的时间分布
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     
     # 按策略分组
-    policy_data: Dict[str, List[int]] = defaultdict(list)
+    llm_times: Dict[str, List[int]] = defaultdict(list)
+    solver_times: Dict[str, List[int]] = defaultdict(list)
     
     for rec in records:
         if rec.dataset != dataset:
             continue
-        policy_data[rec.policy_name].append(rec.total_switches)
+        llm_times[rec.policy_name].append(rec.llm_time_total_ms)
+        solver_times[rec.policy_name].append(rec.solver_time_total_ms)
     
-    # 过滤空数据的策略
-    policy_names = sorted([p for p in policy_data.keys() if len(policy_data[p]) > 0])
+    policy_names = sorted(llm_times.keys())
     
-    if len(policy_names) == 0:
-        print(f"警告: {dataset} 数据集没有找到任何策略数据，跳过绘制 {output_path}")
+    if not policy_names:
+        print(f"警告: 没有数据，跳过绘制 {output_path}")
         plt.close()
         return
     
-    data = [policy_data[p] for p in policy_names]
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
     
-    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    # 子图 1: 箱线图对比
+    ax1 = axes[0]
     
-    for patch, color in zip(bp['boxes'], colors):
+    # 准备数据 - LLM 时间和 Solver 时间并排
+    positions = []
+    box_data = []
+    box_colors = []
+    
+    for i, policy in enumerate(policy_names):
+        pos_llm = i * 2.5
+        pos_solver = i * 2.5 + 1
+        positions.extend([pos_llm, pos_solver])
+        box_data.append(llm_times[policy])
+        box_data.append(solver_times[policy])
+        box_colors.extend([colors[i], colors[i]])
+    
+    bp = ax1.boxplot(box_data, positions=positions, widths=0.8, patch_artist=True)
+    
+    for j, (patch, color) in enumerate(zip(bp['boxes'], box_colors)):
         patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+        patch.set_alpha(0.7 if j % 2 == 0 else 0.4)  # LLM 深色，Solver 浅色
     
-    ax.set_ylabel("Number of Pad Switches", fontsize=12)
-    ax.set_title(f"Pad Switch Count Distribution ({dataset} set)", fontsize=14)
-    ax.grid(True, axis='y', alpha=0.3)
+    # X 轴标签
+    tick_positions = [i * 2.5 + 0.5 for i in range(len(policy_names))]
+    ax1.set_xticks(tick_positions)
+    ax1.set_xticklabels(labels, rotation=15)
+    ax1.set_ylabel("Time (ms)", fontsize=12)
+    ax1.set_title(f"LLM Time (dark) vs Solver Time (light) ({dataset} set)", fontsize=12)
+    ax1.grid(True, axis='y', alpha=0.3)
     
-    plt.xticks(rotation=15)
+    # 子图 2: 散点图 LLM vs Solver
+    ax2 = axes[1]
+    
+    for policy in policy_names:
+        style = get_policy_style(policy)
+        llm_vals = llm_times[policy]
+        solver_vals = solver_times[policy]
+        
+        ax2.scatter(
+            solver_vals, llm_vals,
+            c=style["color"],
+            marker=style["marker"],
+            label=style["label"],
+            alpha=0.6,
+            s=40
+        )
+    
+    # 添加对角线
+    max_val = max(
+        max(max(llm_times[p]) for p in policy_names if llm_times[p]) if any(llm_times[p] for p in policy_names) else 0,
+        max(max(solver_times[p]) for p in policy_names if solver_times[p]) if any(solver_times[p] for p in policy_names) else 0
+    )
+    if max_val > 0:
+        ax2.plot([0, max_val], [0, max_val], 'k--', alpha=0.3, label='y=x')
+    
+    ax2.set_xlabel("Solver Time Total (ms)", fontsize=12)
+    ax2.set_ylabel("LLM Time Total (ms)", fontsize=12)
+    ax2.set_title(f"LLM vs Solver Time Scatter ({dataset} set)", fontsize=12)
+    ax2.legend(loc="upper left", fontsize=9)
+    ax2.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     print(f"保存图表: {output_path}")
 
+
+# ============================================================================
+# 额外图表
+# ============================================================================
 
 def plot_policy_comparison_bars(
     stats: Dict[Tuple[str, str], Dict[str, Any]],
@@ -389,23 +565,27 @@ def plot_policy_comparison_bars(
     """绘制策略对比条形图"""
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # 筛选指定数据集
     filtered = {k: v for k, v in stats.items() if k[0] == dataset}
     
     if not filtered:
         print(f"No data for dataset={dataset}")
+        plt.close()
         return
     
-    # 排序
     policy_names = sorted([k[1] for k in filtered.keys()])
-    values = [filtered[(dataset, p)][metric] for p in policy_names]
+    values = [filtered[(dataset, p)].get(metric, 0) for p in policy_names]
     
     # CI 如果有
-    ci_key = metric.replace("_mean", "_ci95")
+    ci_keys = ["CI_delay", "CI_drift", "combined_ci95"]
     cis = []
     for p in policy_names:
         s = filtered[(dataset, p)]
-        cis.append(s.get(ci_key, 0))
+        ci_val = 0
+        for ci_key in ci_keys:
+            if ci_key in s and metric.replace("mean_", "") in ci_key.lower():
+                ci_val = s[ci_key]
+                break
+        cis.append(ci_val)
     
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
@@ -413,7 +593,6 @@ def plot_policy_comparison_bars(
     x = range(len(policy_names))
     bars = ax.bar(x, values, color=colors, alpha=0.8, edgecolor='white', linewidth=1)
     
-    # 添加误差线
     if any(c > 0 for c in cis):
         ax.errorbar(x, values, yerr=cis, fmt='none', color='black', capsize=5)
     
@@ -423,7 +602,6 @@ def plot_policy_comparison_bars(
     ax.set_title(f"Policy Comparison ({dataset} set)", fontsize=14)
     ax.grid(True, axis='y', alpha=0.3)
     
-    # 添加数值标签
     for bar, val in zip(bars, values):
         height = bar.get_height()
         ax.annotate(f'{val:.2f}',
@@ -449,7 +627,6 @@ def plot_metric_by_disturbance(
     """按扰动级别绘制指标对比"""
     fig, ax = plt.subplots(figsize=(12, 6))
     
-    # 按 (policy, level) 分组
     groups: Dict[Tuple[str, str], List[float]] = defaultdict(list)
     
     for rec in records:
@@ -462,7 +639,7 @@ def plot_metric_by_disturbance(
     policies = sorted(set(k[0] for k in groups.keys()))
     
     x = range(len(levels))
-    width = 0.15
+    width = 0.12
     
     for i, policy in enumerate(policies):
         style = get_policy_style(policy)
@@ -478,7 +655,7 @@ def plot_metric_by_disturbance(
     ax.set_xlabel("Disturbance Level", fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(f"{ylabel} by Disturbance Level ({dataset} set)", fontsize=14)
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper left", fontsize=9, ncol=2)
     ax.grid(True, axis='y', alpha=0.3)
     
     plt.tight_layout()
@@ -497,11 +674,9 @@ def plot_tuning_heatmap(
         print("No tuning results to plot")
         return
     
-    # 提取唯一值
     freeze_values = sorted(set(r["freeze_horizon_slots"] for r in tuning_results))
     wshift_values = sorted(set(r["w_shift"] for r in tuning_results))
     
-    # 构建矩阵（取 w_switch 的平均）
     matrix = {}
     for r in tuning_results:
         key = (r["freeze_horizon_slots"], r["w_shift"])
@@ -509,7 +684,6 @@ def plot_tuning_heatmap(
             matrix[key] = []
         matrix[key].append(r["combined_score"])
     
-    # 转为 2D 数组
     data = []
     for freeze in freeze_values:
         row = []
@@ -534,7 +708,6 @@ def plot_tuning_heatmap(
     
     plt.colorbar(im, ax=ax, label="Combined Score")
     
-    # 添加数值
     for i in range(len(freeze_values)):
         for j in range(len(wshift_values)):
             ax.text(j, i, f'{data[i][j]:.1f}',
@@ -548,99 +721,70 @@ def plot_tuning_heatmap(
     print(f"保存图表: {output_path}")
 
 
-def plot_solve_time_comparison(
-    records: List[EpisodeRecord],
-    output_path: str,
-    dataset: str = "test"
+# ============================================================================
+# Summary CSV 输出
+# ============================================================================
+
+def save_summary_csv(
+    stats: Dict[Tuple[str, str], Dict[str, Any]],
+    output_path: str
 ):
-    """绘制求解时间对比图"""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """
+    保存汇总 CSV（包含所有要求的字段）
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     
-    policy_data: Dict[str, List[float]] = defaultdict(list)
+    fieldnames = [
+        "dataset", "policy_name", "n",
+        "mean_delay", "CI_delay",
+        "mean_drift", "CI_drift",
+        "combined_mean", "combined_ci95",
+        "on_time_mean",
+        "mean_replans", "mean_switch", "mean_shifts",
+        "mean_solver_time_ms", "mean_wall_time_ms",
+        "fallback_rate", "cache_hit_rate",
+        "mean_llm_time_ms", "mean_llm_total_tokens",
+        "total_llm_calls", "total_fallbacks"
+    ]
     
-    for rec in records:
-        if rec.dataset != dataset:
-            continue
-        policy_data[rec.policy_name].append(rec.avg_solve_time_ms)
+    rows = []
+    for key in sorted(stats.keys()):
+        s = stats[key]
+        row = {
+            "dataset": s["dataset"],
+            "policy_name": s["policy_name"],
+            "n": s["n"],
+            "mean_delay": round(s["mean_delay"], 3),
+            "CI_delay": round(s["CI_delay"], 3),
+            "mean_drift": round(s["mean_drift"], 5),
+            "CI_drift": round(s["CI_drift"], 5),
+            "combined_mean": round(s["combined_mean"], 3),
+            "combined_ci95": round(s["combined_ci95"], 3),
+            "on_time_mean": round(s["on_time_mean"], 4),
+            "mean_replans": round(s["mean_replans"], 2),
+            "mean_switch": round(s["mean_switch"], 2),
+            "mean_shifts": round(s["mean_shifts"], 2),
+            "mean_solver_time_ms": round(s["mean_solver_time_ms"], 1),
+            "mean_wall_time_ms": round(s["mean_wall_time_ms"], 1),
+            "fallback_rate": round(s["fallback_rate"], 4),
+            "cache_hit_rate": round(s["cache_hit_rate"], 4),
+            "mean_llm_time_ms": round(s["mean_llm_time_ms"], 1),
+            "mean_llm_total_tokens": round(s["mean_llm_total_tokens"], 0),
+            "total_llm_calls": s["total_llm_calls"],
+            "total_fallbacks": s["total_fallbacks"]
+        }
+        rows.append(row)
     
-    policy_names = sorted(policy_data.keys())
-    means = [mean(policy_data[p]) for p in policy_names]
-    stds = [std(policy_data[p]) for p in policy_names]
-    colors = [get_policy_style(p)["color"] for p in policy_names]
-    labels = [get_policy_style(p)["label"] for p in policy_names]
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
     
-    x = range(len(policy_names))
-    ax.bar(x, means, color=colors, alpha=0.8, yerr=stds, capsize=5)
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15)
-    ax.set_ylabel("Average Solve Time (ms)", fontsize=12)
-    ax.set_title(f"Solver Performance ({dataset} set)", fontsize=14)
-    ax.grid(True, axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    print(f"保存图表: {output_path}")
+    print(f"保存汇总 CSV: {output_path}")
 
 
-# ============================================================================
-# 汇总输出
-# ============================================================================
-
-def print_summary_table(stats: Dict[Tuple[str, str], Dict[str, Any]], dataset: str = "test"):
-    """打印汇总表格"""
-    print(f"\n{'='*80}")
-    print(f" Summary Statistics ({dataset} set)")
-    print(f"{'='*80}")
-    
-    filtered = {k: v for k, v in stats.items() if k[0] == dataset}
-    
-    if not filtered:
-        print("No data available")
-        return
-    
-    # 表头
-    headers = ["Policy", "N", "Delay", "Drift", "Combined", "OnTime%", "Shifts", "Switches"]
-    widths = [15, 5, 15, 15, 15, 10, 8, 10]
-    
-    header_line = "│"
-    for h, w in zip(headers, widths):
-        header_line += f" {h:^{w}} │"
-    
-    sep = "├" + "┼".join(["─" * (w + 2) for w in widths]) + "┤"
-    top = "┌" + "┬".join(["─" * (w + 2) for w in widths]) + "┐"
-    bottom = "└" + "┴".join(["─" * (w + 2) for w in widths]) + "┘"
-    
-    print(top)
-    print(header_line)
-    print(sep)
-    
-    for key in sorted(filtered.keys(), key=lambda x: x[1]):
-        s = filtered[key]
-        policy_label = get_policy_style(s["policy_name"])["label"]
-        
-        row = [
-            policy_label[:15],
-            str(s["n"]),
-            f"{s['delay_mean']:.2f}±{s['delay_ci95']:.2f}",
-            f"{s['drift_mean']:.4f}±{s['drift_ci95']:.4f}",
-            f"{s['combined_mean']:.2f}±{s['combined_ci95']:.2f}",
-            f"{s['on_time_mean']:.1%}",
-            f"{s['shifts_mean']:.1f}",
-            f"{s['switches_mean']:.1f}"
-        ]
-        
-        row_line = "│"
-        for cell, w in zip(row, widths):
-            row_line += f" {cell:^{w}} │"
-        print(row_line)
-    
-    print(bottom)
-
-
-def save_enhanced_summary(
+def save_enhanced_summary_with_tests(
     records: List[EpisodeRecord],
     stats: Dict[Tuple[str, str], Dict[str, Any]],
     output_path: str,
@@ -648,15 +792,12 @@ def save_enhanced_summary(
 ):
     """保存增强的汇总 CSV（含配对检验）"""
     
-    # 配对 t 检验：fixed_tuned vs 其他策略
     test_records = [r for r in records if r.dataset == "test"]
     
-    # 按 seed 匹配
     by_seed: Dict[int, Dict[str, EpisodeRecord]] = defaultdict(dict)
     for rec in test_records:
         by_seed[rec.seed][rec.policy_name] = rec
     
-    # 计算配对检验
     baseline = "fixed_tuned"
     comparisons = {}
     
@@ -679,44 +820,56 @@ def save_enhanced_summary(
             comparisons[policy] = {
                 "t_statistic": t_stat,
                 "p_value": p_val,
-                "n_pairs": len(baseline_vals),
-                "baseline_mean": mean(baseline_vals),
-                "other_mean": mean(other_vals)
+                "n_pairs": len(baseline_vals)
             }
     
-    # 输出文件
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     
+    fieldnames = [
+        "dataset", "policy_name", "n",
+        "mean_delay", "CI_delay",
+        "mean_drift", "CI_drift",
+        "combined_mean", "combined_ci95",
+        "on_time_mean",
+        "mean_replans", "mean_switch",
+        "mean_solver_time_ms", "mean_wall_time_ms",
+        "fallback_rate", "cache_hit_rate",
+        "mean_llm_time_ms", "mean_llm_total_tokens",
+        "vs_tuned_t_stat", "vs_tuned_p_value"
+    ]
+    
     rows = []
-    for key, s in sorted(stats.items()):
+    for key in sorted(stats.keys()):
+        s = stats[key]
         row = {
             "dataset": s["dataset"],
             "policy_name": s["policy_name"],
             "n": s["n"],
-            "delay_mean": round(s["delay_mean"], 3),
-            "delay_ci95": round(s["delay_ci95"], 3),
-            "drift_mean": round(s["drift_mean"], 5),
-            "drift_ci95": round(s["drift_ci95"], 5),
+            "mean_delay": round(s["mean_delay"], 3),
+            "CI_delay": round(s["CI_delay"], 3),
+            "mean_drift": round(s["mean_drift"], 5),
+            "CI_drift": round(s["CI_drift"], 5),
             "combined_mean": round(s["combined_mean"], 3),
             "combined_ci95": round(s["combined_ci95"], 3),
             "on_time_mean": round(s["on_time_mean"], 4),
-            "shifts_mean": round(s["shifts_mean"], 2),
-            "switches_mean": round(s["switches_mean"], 2),
-            "solve_time_mean": round(s["solve_time_mean"], 1)
+            "mean_replans": round(s["mean_replans"], 2),
+            "mean_switch": round(s["mean_switch"], 2),
+            "mean_solver_time_ms": round(s["mean_solver_time_ms"], 1),
+            "mean_wall_time_ms": round(s["mean_wall_time_ms"], 1),
+            "fallback_rate": round(s["fallback_rate"], 4),
+            "cache_hit_rate": round(s["cache_hit_rate"], 4),
+            "mean_llm_time_ms": round(s["mean_llm_time_ms"], 1),
+            "mean_llm_total_tokens": round(s["mean_llm_total_tokens"], 0),
+            "vs_tuned_t_stat": "",
+            "vs_tuned_p_value": ""
         }
         
-        # 添加配对检验结果
         if s["dataset"] == "test" and s["policy_name"] in comparisons:
             comp = comparisons[s["policy_name"]]
             row["vs_tuned_t_stat"] = round(comp["t_statistic"], 3)
             row["vs_tuned_p_value"] = round(comp["p_value"], 4)
-        else:
-            row["vs_tuned_t_stat"] = ""
-            row["vs_tuned_p_value"] = ""
         
         rows.append(row)
-    
-    fieldnames = list(rows[0].keys()) if rows else []
     
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -725,6 +878,222 @@ def save_enhanced_summary(
             writer.writerow(row)
     
     print(f"保存增强汇总: {output_path}")
+
+
+# ============================================================================
+# LLM Reliability Report
+# ============================================================================
+
+def generate_llm_reliability_report(
+    records: List[EpisodeRecord],
+    output_path: str,
+    dataset: str = "test"
+):
+    """
+    为 llm_real 策略生成可靠性报告（Markdown 格式）
+    """
+    # 筛选 llm_real 数据
+    llm_records = [r for r in records if r.policy_name == "llm_real" and r.dataset == dataset]
+    
+    if not llm_records:
+        print(f"没有 llm_real 策略的数据，跳过 reliability report")
+        return
+    
+    # 统计计算
+    total_calls = sum(r.llm_calls for r in llm_records)
+    total_fallbacks = sum(r.llm_fallback_count for r in llm_records)
+    total_tokens = sum(r.llm_total_tokens for r in llm_records)
+    total_prompt_tokens = sum(r.llm_prompt_tokens for r in llm_records)
+    total_completion_tokens = sum(r.llm_completion_tokens for r in llm_records)
+    
+    # 计算率
+    fallback_rate = total_fallbacks / total_calls if total_calls > 0 else 0.0
+    
+    # cache_hit_rate 加权平均
+    weighted_cache = sum(r.llm_cache_hit_rate * r.llm_calls for r in llm_records)
+    cache_hit_rate = weighted_cache / total_calls if total_calls > 0 else 0.0
+    
+    # Token 分布
+    tokens_per_call = [r.llm_total_tokens / r.llm_calls if r.llm_calls > 0 else 0 for r in llm_records]
+    tokens_per_episode = [r.llm_total_tokens for r in llm_records]
+    
+    # LLM 时间分布
+    llm_times = [r.llm_time_total_ms for r in llm_records]
+    latencies = [r.llm_latency_total_ms for r in llm_records]
+    
+    # 生成 Markdown
+    report = f"""# LLM Real Strategy Reliability Report
+
+**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}  
+**Dataset:** {dataset}  
+**Episodes:** {len(llm_records)}
+
+---
+
+## 1. Summary Statistics
+
+| Metric | Value |
+|--------|-------|
+| Total LLM Calls | {total_calls:,} |
+| Total Fallbacks | {total_fallbacks:,} |
+| **Fallback Rate** | **{fallback_rate:.2%}** |
+| **Cache Hit Rate** | **{cache_hit_rate:.2%}** |
+
+---
+
+## 2. Token Usage
+
+| Metric | Value |
+|--------|-------|
+| Total Tokens | {total_tokens:,} |
+| Prompt Tokens | {total_prompt_tokens:,} |
+| Completion Tokens | {total_completion_tokens:,} |
+| Avg Tokens/Episode | {mean(tokens_per_episode):.1f} |
+| Avg Tokens/Call | {mean(tokens_per_call):.1f} |
+
+### Token Distribution (per episode)
+
+| Percentile | Tokens |
+|------------|--------|
+| Min | {min(tokens_per_episode) if tokens_per_episode else 0} |
+| 25% | {percentile(tokens_per_episode, 25):.0f} |
+| 50% (Median) | {percentile(tokens_per_episode, 50):.0f} |
+| 75% | {percentile(tokens_per_episode, 75):.0f} |
+| Max | {max(tokens_per_episode) if tokens_per_episode else 0} |
+
+---
+
+## 3. Latency Analysis
+
+| Metric | Value |
+|--------|-------|
+| Mean LLM Time (ms) | {mean(llm_times):.1f} |
+| Std LLM Time (ms) | {std(llm_times):.1f} |
+| Mean Latency (ms) | {mean(latencies):.1f} |
+| Min Latency (ms) | {min(latencies) if latencies else 0} |
+| Max Latency (ms) | {max(latencies) if latencies else 0} |
+
+### Latency Distribution (per episode)
+
+| Percentile | Latency (ms) |
+|------------|--------------|
+| 25% | {percentile(latencies, 25):.0f} |
+| 50% | {percentile(latencies, 50):.0f} |
+| 75% | {percentile(latencies, 75):.0f} |
+| 95% | {percentile(latencies, 95):.0f} |
+| 99% | {percentile(latencies, 99):.0f} |
+
+---
+
+## 4. Performance Metrics
+
+| Metric | Mean | Std | CI (95%) |
+|--------|------|-----|----------|
+| Avg Delay | {mean([r.avg_delay for r in llm_records]):.2f} | {std([r.avg_delay for r in llm_records]):.2f} | ±{ci95([r.avg_delay for r in llm_records]):.2f} |
+| Episode Drift | {mean([r.episode_drift for r in llm_records]):.4f} | {std([r.episode_drift for r in llm_records]):.4f} | ±{ci95([r.episode_drift for r in llm_records]):.4f} |
+| On-time Rate | {mean([r.on_time_rate for r in llm_records]):.2%} | - | - |
+| Replans | {mean([r.num_replans for r in llm_records]):.1f} | {std([r.num_replans for r in llm_records]):.1f} | - |
+
+---
+
+## 5. Reliability Assessment
+
+"""
+    
+    # 可靠性评估
+    if fallback_rate < 0.05:
+        reliability_grade = "A (Excellent)"
+        reliability_note = "Fallback rate is very low, indicating stable LLM performance."
+    elif fallback_rate < 0.10:
+        reliability_grade = "B (Good)"
+        reliability_note = "Fallback rate is acceptable for production use."
+    elif fallback_rate < 0.20:
+        reliability_grade = "C (Fair)"
+        reliability_note = "Consider investigating fallback causes."
+    else:
+        reliability_grade = "D (Poor)"
+        reliability_note = "High fallback rate indicates LLM reliability issues."
+    
+    report += f"""### Overall Grade: **{reliability_grade}**
+
+{reliability_note}
+
+### Recommendations
+
+"""
+    
+    if fallback_rate > 0.05:
+        report += "- Review LLM output parsing logic for edge cases\n"
+    if cache_hit_rate < 0.3:
+        report += "- Consider warming up cache with common scenarios\n"
+    if mean(latencies) > 5000:
+        report += "- High latency detected, consider timeout optimization\n"
+    if total_tokens / len(llm_records) > 500:
+        report += "- High token usage, consider prompt optimization\n"
+    
+    report += "\n---\n\n*Report generated by analyze.py*\n"
+    
+    # 保存
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    
+    print(f"保存 LLM 可靠性报告: {output_path}")
+
+
+# ============================================================================
+# 控制台输出
+# ============================================================================
+
+def print_summary_table(stats: Dict[Tuple[str, str], Dict[str, Any]], dataset: str = "test"):
+    """打印汇总表格"""
+    print(f"\n{'='*100}")
+    print(f" Summary Statistics ({dataset} set)")
+    print(f"{'='*100}")
+    
+    filtered = {k: v for k, v in stats.items() if k[0] == dataset}
+    
+    if not filtered:
+        print("No data available")
+        return
+    
+    # 简化表头
+    headers = ["Policy", "N", "Delay", "Drift", "Replans", "Switch", "Fallback%", "Cache%"]
+    widths = [15, 5, 15, 15, 8, 8, 10, 10]
+    
+    header_line = "│"
+    for h, w in zip(headers, widths):
+        header_line += f" {h:^{w}} │"
+    
+    sep = "├" + "┼".join(["─" * (w + 2) for w in widths]) + "┤"
+    top = "┌" + "┬".join(["─" * (w + 2) for w in widths]) + "┐"
+    bottom = "└" + "┴".join(["─" * (w + 2) for w in widths]) + "┘"
+    
+    print(top)
+    print(header_line)
+    print(sep)
+    
+    for key in sorted(filtered.keys(), key=lambda x: x[1]):
+        s = filtered[key]
+        policy_label = get_policy_style(s["policy_name"])["label"]
+        
+        row = [
+            policy_label[:15],
+            str(s["n"]),
+            f"{s['mean_delay']:.2f}±{s['CI_delay']:.2f}",
+            f"{s['mean_drift']:.4f}±{s['CI_drift']:.4f}",
+            f"{s['mean_replans']:.1f}",
+            f"{s['mean_switch']:.1f}",
+            f"{s['fallback_rate']:.1%}",
+            f"{s['cache_hit_rate']:.1%}"
+        ]
+        
+        row_line = "│"
+        for cell, w in zip(row, widths):
+            row_line += f" {cell:^{w}} │"
+        print(row_line)
+    
+    print(bottom)
 
 
 # ============================================================================
@@ -741,7 +1110,7 @@ def run_analysis(
     运行完整分析流程
     """
     print("\n" + "="*70)
-    print(" 实验结果分析")
+    print(" 实验结果分析 (含 LLM 指标)")
     print("="*70)
     print(f"输入目录: {input_dir}")
     print(f"输出目录: {output_dir}")
@@ -762,52 +1131,55 @@ def run_analysis(
     print(f"加载 {len(records)} episode 记录")
     print(f"加载 {len(tuning_results)} 调参结果")
     
-    # 检测可用的数据集
+    # 检测可用的数据集和策略
     available_datasets = set(rec.dataset for rec in records)
+    available_policies = set(rec.policy_name for rec in records)
     print(f"可用数据集: {sorted(available_datasets)}")
+    print(f"可用策略: {sorted(available_policies)}")
     
-    # 优先使用 test，如果没有则使用 train
     primary_dataset = "test" if "test" in available_datasets else "train"
-    print(f"使用数据集绘图: {primary_dataset}")
+    print(f"主数据集: {primary_dataset}")
     
     # 2. 计算统计
     stats = compute_summary_stats(records, tuning_lambda)
     
     # 3. 打印汇总
-    if "test" in available_datasets:
-        print_summary_table(stats, "test")
-    if "train" in available_datasets:
-        print_summary_table(stats, "train")
+    for ds in sorted(available_datasets):
+        print_summary_table(stats, ds)
     
-    # 4. 保存增强汇总
-    enhanced_summary_path = os.path.join(output_dir, "summary_with_tests.csv")
-    save_enhanced_summary(records, stats, enhanced_summary_path, tuning_lambda)
+    # 4. 保存 summary.csv
+    summary_path = os.path.join(output_dir, "summary.csv")
+    save_summary_csv(stats, summary_path)
     
-    # 5. 生成图表
+    # 5. 保存增强汇总（含 t 检验）
+    enhanced_path = os.path.join(output_dir, "summary_with_tests.csv")
+    save_enhanced_summary_with_tests(records, stats, enhanced_path, tuning_lambda)
+    
+    # 6. 生成图表
     print("\n生成图表...")
     
-    # Delay vs Drift 散点图
+    # 图表 1: Delay vs Drift 散点图
     plot_delay_vs_drift_scatter(
         records,
         os.path.join(output_dir, "delay_vs_drift_scatter.png"),
         dataset=primary_dataset
     )
     
-    # 重排次数分布
-    plot_replans_distribution(
+    # 图表 2: 重排/切换次数分布
+    plot_replans_switches_boxplot(
         records,
-        os.path.join(output_dir, "replans_distribution.png"),
+        os.path.join(output_dir, "replans_switches_boxplot.png"),
         dataset=primary_dataset
     )
     
-    # 切换次数分布
-    plot_switches_distribution(
+    # 图表 3: LLM Time vs Solver Time
+    plot_llm_vs_solver_time(
         records,
-        os.path.join(output_dir, "switches_distribution.png"),
+        os.path.join(output_dir, "llm_vs_solver_time.png"),
         dataset=primary_dataset
     )
     
-    # 策略对比条形图
+    # 额外图表
     plot_policy_comparison_bars(
         stats,
         os.path.join(output_dir, "policy_comparison_combined.png"),
@@ -820,19 +1192,10 @@ def run_analysis(
         stats,
         os.path.join(output_dir, "policy_comparison_delay.png"),
         dataset=primary_dataset,
-        metric="delay_mean",
+        metric="mean_delay",
         ylabel="Average Delay (slots)"
     )
     
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_drift.png"),
-        dataset=primary_dataset,
-        metric="drift_mean",
-        ylabel="Episode Plan Drift"
-    )
-    
-    # 按扰动级别的对比
     plot_metric_by_disturbance(
         records,
         os.path.join(output_dir, "delay_by_disturbance.png"),
@@ -849,13 +1212,6 @@ def run_analysis(
         dataset=primary_dataset
     )
     
-    # 求解时间对比
-    plot_solve_time_comparison(
-        records,
-        os.path.join(output_dir, "solve_time_comparison.png"),
-        dataset=primary_dataset
-    )
-    
     # 调参热力图
     if tuning_results:
         plot_tuning_heatmap(
@@ -863,20 +1219,28 @@ def run_analysis(
             os.path.join(output_dir, "tuning_heatmap.png")
         )
     
+    # 7. LLM Reliability Report（如果有 llm_real 数据）
+    if "llm_real" in available_policies:
+        report_path = os.path.join(output_dir, "reliability_report.md")
+        generate_llm_reliability_report(records, report_path, dataset=primary_dataset)
+    
+    # 完成
     print(f"\n{'='*70}")
     print(" 分析完成！")
     print(f"{'='*70}")
     print(f"输出文件:")
-    print(f"  - {enhanced_summary_path}")
+    print(f"  - {summary_path}")
+    print(f"  - {enhanced_path}")
     print(f"  - {output_dir}/delay_vs_drift_scatter.png")
-    print(f"  - {output_dir}/replans_distribution.png")
-    print(f"  - {output_dir}/switches_distribution.png")
+    print(f"  - {output_dir}/replans_switches_boxplot.png")
+    print(f"  - {output_dir}/llm_vs_solver_time.png")
     print(f"  - {output_dir}/policy_comparison_*.png")
     print(f"  - {output_dir}/delay_by_disturbance.png")
     print(f"  - {output_dir}/drift_by_disturbance.png")
-    print(f"  - {output_dir}/solve_time_comparison.png")
     if tuning_results:
         print(f"  - {output_dir}/tuning_heatmap.png")
+    if "llm_real" in available_policies:
+        print(f"  - {output_dir}/reliability_report.md")
     
     if show_plots:
         plt.show()
@@ -888,19 +1252,31 @@ def run_analysis(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="实验结果分析与绘图"
+        description="实验结果分析与绘图（支持 LLM 指标）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 基本分析
+  python analyze.py --input results/ --output figures/
+
+  # 显示图表
+  python analyze.py --input results/ --output figures/ --show
+
+  # 自定义 lambda
+  python analyze.py --input results/ --output figures/ --lambda 10.0
+"""
     )
     parser.add_argument(
         "--input", "-i", type=str, default="results",
-        help="输入目录（包含 results_per_episode.csv）"
+        help="输入目录（包含 results_per_episode.csv）(default: results/)"
     )
     parser.add_argument(
         "--output", "-o", type=str, default="figures",
-        help="输出目录（保存图表）"
+        help="输出目录（保存图表和报告）(default: figures/)"
     )
     parser.add_argument(
         "--lambda", dest="tuning_lambda", type=float, default=5.0,
-        help="综合目标中 drift 的权重"
+        help="综合目标中 drift 的权重 (default: 5.0)"
     )
     parser.add_argument(
         "--show", action="store_true",

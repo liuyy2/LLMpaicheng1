@@ -17,10 +17,17 @@ from policies.policy_greedy import GreedyPolicy, EDFGreedyPolicy, WindowGreedyPo
 from policies.policy_llm_meta import (
     MockLLMPolicy,
     LLMInterfacePolicy,
+    RealLLMPolicy,
     META_PARAMS_SCHEMA,
     validate_meta_params_json,
     json_to_meta_params,
-    create_mock_llm_policy
+    create_mock_llm_policy,
+    create_real_llm_policy,
+    ValidationResult,
+    LLMDecisionLog,
+    LLMPolicyLogger,
+    build_user_prompt,
+    SYSTEM_PROMPT
 )
 
 
@@ -44,10 +51,17 @@ __all__ = [
     # LLM 策略
     "MockLLMPolicy",
     "LLMInterfacePolicy",
+    "RealLLMPolicy",
     "META_PARAMS_SCHEMA",
     "validate_meta_params_json",
     "json_to_meta_params",
     "create_mock_llm_policy",
+    "create_real_llm_policy",
+    "ValidationResult",
+    "LLMDecisionLog",
+    "LLMPolicyLogger",
+    "build_user_prompt",
+    "SYSTEM_PROMPT",
 ]
 
 

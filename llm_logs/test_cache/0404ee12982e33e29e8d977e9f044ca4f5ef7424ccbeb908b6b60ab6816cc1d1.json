@@ -1,0 +1,9 @@
+{
+  "raw_text": "二",
+  "finish_reason": "stop",
+  "tokens_prompt": 22,
+  "tokens_completion": 1,
+  "tokens_total": 23,
+  "model": "Qwen/Qwen3-32B",
+  "cached_at": "2026-01-18T13:06:38.756686"
+}
