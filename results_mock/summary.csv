@@ -1,0 +1,11 @@
+dataset,policy_name,num_episodes,avg_delay_mean,avg_delay_ci95,episode_drift_mean,episode_drift_ci95,combined_score_mean,combined_score_ci95,on_time_rate_mean,total_shifts_mean,total_switches_mean,avg_solve_time_ms_mean,llm_calls_mean,llm_tokens_mean,llm_fallback_mean,llm_cache_hit_rate_mean
+test,fixed_default,9,0.0,0.0,0.00122,0.00098,0.006,0.005,1.0,2.44,1.22,15.3,0.0,0.0,0.0,0.0
+test,fixed_tuned,9,0.0,0.0,0.00129,0.00076,0.006,0.004,1.0,11.33,0.44,15.1,0.0,0.0,0.0,0.0
+test,greedy,9,0.0,0.0,0.00084,0.00101,0.004,0.005,1.0,0.89,1.0,0.0,0.0,0.0,0.0,0.0
+test,mockllm,9,0.0,0.0,0.00147,0.00106,0.007,0.005,1.0,2.33,1.33,14.7,46.4,0.0,0.0,0.0
+test,nofreeze,9,0.0,0.0,0.00122,0.00098,0.006,0.005,1.0,2.44,1.22,15.2,0.0,0.0,0.0,0.0
+train,fixed_default,9,0.0,0.0,0.0017,0.00153,0.009,0.008,1.0,3.22,1.33,15.3,0.0,0.0,0.0,0.0
+train,fixed_tuned,9,0.0,0.0,0.00163,0.00065,0.008,0.003,1.0,13.0,0.44,15.3,0.0,0.0,0.0,0.0
+train,greedy,9,0.0,0.0,0.00101,0.00061,0.005,0.003,1.0,0.78,1.78,0.0,0.0,0.0,0.0,0.0
+train,mockllm,9,0.0,0.0,0.00151,0.00113,0.008,0.006,1.0,2.67,1.44,14.7,46.6,0.0,0.0,0.0
+train,nofreeze,9,0.0,0.0,0.00145,0.00112,0.007,0.006,1.0,2.78,1.33,15.3,0.0,0.0,0.0,0.0
