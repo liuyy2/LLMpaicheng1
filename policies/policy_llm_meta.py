@@ -436,22 +436,24 @@ class LLMPolicyLogger:
 # Prompt 构建
 # ============================================================================
 
-SYSTEM_PROMPT = """你是一个火箭发射排程优化助手。你的任务是根据当前状态特征，输出优化器的元参数。
+SYSTEM_PROMPT = """你是一个火箭发射排程优化的“元参数调参器”。你的目标是：在不显著增加延迟的前提下，尽量降低计划漂移（drift）。
 
 重要规则：
 1. 你只能输出元参数 JSON，严禁输出具体的任务排程
 2. 参数将传递给 CP-SAT 优化器进行实际排程
-3. 只输出 JSON，不要解释
+3. 只输出 JSON，不要解释，不要代码块
 
-输出格式：
-```json
-{
-  "w_delay": <延迟惩罚权重, 0.1-100>,
-  "w_shift": <时间偏移惩罚权重, 0-50>,
-  "w_switch": <Pad切换惩罚权重, 0-50>,
-  "freeze_horizon": <冻结视野slots, 0-72>
-}
-```"""
+默认基线（无强信号时直接返回）：
+{"w_delay": 10.0, "w_shift": 1.0, "w_switch": 5.0, "freeze_horizon": 12}
+
+建议输出范围（优先在此范围内微调）：
+- w_delay: 5.0 - 30.0
+- w_shift: 0.5 - 5.0
+- w_switch: 2.0 - 15.0
+- freeze_horizon: 6 - 24
+
+输出格式（严格 JSON）：
+{"w_delay": <number>, "w_shift": <number>, "w_switch": <number>, "freeze_horizon": <int>}"""
 
 
 def build_user_prompt(features: StateFeatures) -> str:
@@ -464,19 +466,27 @@ def build_user_prompt(features: StateFeatures) -> str:
 ```
 
 特征说明：
-- window_loss_pct: 窗口可用性损失比例 (0-1)，高值表示窗口收紧
+- window_loss_pct: 窗口可用性损失比例 (0-1)
+- window_remaining_pct: 剩余窗口比例 (0-1)
 - pad_outage_overlap_hours: 未来视野内 Pad 不可用时长（小时）
+- pad_outage_task_count: 受 outage 影响的任务数
 - delay_increase_minutes: 预估延误增加（分钟）
-- num_urgent_tasks: 紧急任务数（即将到期）
+- current_total_delay_minutes: 当前累计延误（分钟）
+- num_tasks_in_horizon: 视野内任务数
+- num_urgent_tasks: 紧急任务数
 - completed_rate: 已完成任务比例
+- recent_shift_count: 最近一次重排的时间变化数
+- recent_switch_count: 最近一次重排的 pad 切换数
 
-决策原则：
-- 高 window_loss_pct → 增大 freeze_horizon 保护计划稳定性
-- 高 pad_outage → 降低 w_switch 允许灵活切换
-- 高 num_urgent_tasks → 增大 w_delay 优先保证时效
-- 高 delay_increase → 适当降低 w_shift 允许调整
+决策原则（优先稳定性，少量微调）：
+- 默认返回基线：w_delay=10, w_shift=1, w_switch=5, freeze_horizon=12
+- window_loss_pct 高 或 window_remaining_pct 低 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
+- pad_outage_overlap_hours 高 且 pad_outage_task_count>0 → 允许切换：w_switch↓（但不低于 2）
+- num_urgent_tasks 高 或 delay_increase_minutes 高 → 提高时效：w_delay↑
+- recent_shift_count / recent_switch_count 高 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
+- completed_rate 高 → 更保守：w_shift↑, w_switch↑
 
-请输出元参数 JSON："""
+输出仅 JSON（不要代码块/解释）："""
     
     return prompt
 
