@@ -109,8 +109,8 @@ def generate_tasks(
         # release: 在仿真前 2/3 时间内随机分布
         release = rng.randint(0, int(sim_total * 0.6))
         
-        # duration: 3-12 slots (30min - 2h)
-        duration = rng.randint(3, 12)
+        # duration: 6-18 slots (60min - 3h)
+        duration = rng.randint(6, 18)
         
         # windows: 1-3 个窗口段
         num_windows = rng.randint(
@@ -123,8 +123,8 @@ def generate_tasks(
         window_start_base = release + duration + rng.randint(5, 20)
         
         for w in range(num_windows):
-            # 每个窗口 6-24 slots (1-4h)
-            window_duration = rng.randint(6, 24)
+            # 每个窗口 4-12 slots (40min - 2h)
+            window_duration = rng.randint(4, 12)
             window_start = window_start_base + w * rng.randint(30, 60)
             window_end = min(window_start + window_duration, sim_total - 1)
             
@@ -137,9 +137,8 @@ def generate_tasks(
             window_end = min(window_start + 30, sim_total - 1)
             windows = [(window_start, window_end)]
         
-        # due: 第一个窗口结束后一段时间
-        first_window_end = windows[0][1]
-        due = first_window_end + rng.randint(0, 20)
+        # due: first window start + small slack
+        due = windows[0][0] + rng.randint(0, 4)
         
         # priority: 0.3 - 1.0
         priority = round(rng.uniform(0.3, 1.0), 2)

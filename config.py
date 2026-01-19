@@ -40,9 +40,9 @@ class Config:
     drift_beta: float = 0.3                   # pad 切换权重
     
     # 场景生成
-    num_tasks_range: Tuple[int, int] = (10, 20)
-    num_pads: int = 3
-    windows_per_task_range: Tuple[int, int] = (1, 3)
+    num_tasks_range: Tuple[int, int] = (20, 30)
+    num_pads: int = 2
+    windows_per_task_range: Tuple[int, int] = (1, 2)
 
 
 # 默认配置实例

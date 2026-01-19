@@ -113,22 +113,22 @@ class ExperimentConfig:
 # 扰动强度对应的 Config 参数
 DISTURBANCE_CONFIGS = {
     "light": {
-        "p_weather": 0.02,
-        "p_pad_outage": 0.006,
-        "sigma_duration": 0.05,
-        "sigma_release": 1.0
-    },
-    "medium": {
-        "p_weather": 0.03,
+        "p_weather": 0.05,
         "p_pad_outage": 0.02,
-        "sigma_duration": 0.1,
+        "sigma_duration": 0.12,
         "sigma_release": 2.0
     },
-    "heavy": {
-        "p_weather": 0.05,
+    "medium": {
+        "p_weather": 0.07,
         "p_pad_outage": 0.03,
-        "sigma_duration": 0.15,
+        "sigma_duration": 0.2,
         "sigma_release": 3.0
+    },
+    "heavy": {
+        "p_weather": 0.10,
+        "p_pad_outage": 0.05,
+        "sigma_duration": 0.3,
+        "sigma_release": 4.0
     }
 }
 

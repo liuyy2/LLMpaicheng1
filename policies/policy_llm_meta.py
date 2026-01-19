@@ -60,7 +60,7 @@ META_PARAMS_SCHEMA: Dict[str, Any] = {
         "w_switch": {
             "type": "number",
             "minimum": 0.0,
-            "maximum": 50.0,
+            "maximum": 300.0,
             "default": 5.0,
             "description": "Pad 切换惩罚权重"
         },
@@ -443,14 +443,14 @@ SYSTEM_PROMPT = """你是一个火箭发射排程优化的“元参数调参器�
 2. 参数将传递给 CP-SAT 优化器进行实际排程
 3. 只输出 JSON，不要解释，不要代码块
 
-默认基线（无强信号时直接返回）：
-{"w_delay": 10.0, "w_shift": 1.0, "w_switch": 5.0, "freeze_horizon": 12}
+当前调参基线（无强信号时直接返回）：
+{"w_delay": 50.0, "w_shift": 0.0, "w_switch": 180.0, "freeze_horizon": 0}
 
 建议输出范围（优先在此范围内微调）：
-- w_delay: 5.0 - 30.0
-- w_shift: 0.5 - 5.0
-- w_switch: 2.0 - 15.0
-- freeze_horizon: 6 - 24
+- w_delay: 20.0 - 80.0
+- w_shift: 0.0 - 8.0
+- w_switch: 60.0 - 240.0
+- freeze_horizon: 0 - 24
 
 输出格式（严格 JSON）：
 {"w_delay": <number>, "w_shift": <number>, "w_switch": <number>, "freeze_horizon": <int>}"""
@@ -478,11 +478,11 @@ def build_user_prompt(features: StateFeatures) -> str:
 - recent_shift_count: 最近一次重排的时间变化数
 - recent_switch_count: 最近一次重排的 pad 切换数
 
-决策原则（优先稳定性，少量微调）：
-- 默认返回基线：w_delay=10, w_shift=1, w_switch=5, freeze_horizon=12
+决策原则（以当前调参基线为锚点，按信号强度微调）：
+- 默认返回基线：w_delay=50, w_shift=0, w_switch=180, freeze_horizon=0
 - window_loss_pct 高 或 window_remaining_pct 低 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
-- pad_outage_overlap_hours 高 且 pad_outage_task_count>0 → 允许切换：w_switch↓（但不低于 2）
-- num_urgent_tasks 高 或 delay_increase_minutes 高 → 提高时效：w_delay↑
+- pad_outage_overlap_hours 高 且 pad_outage_task_count>0 → 允许切换：w_switch↓（但不低于 60）
+- num_urgent_tasks 高 或 delay_increase_minutes 高 → 提高时效：w_delay↑，同时保持 w_shift 低、freeze_horizon 低
 - recent_shift_count / recent_switch_count 高 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
 - completed_rate 高 → 更保守：w_shift↑, w_switch↑
 
@@ -537,10 +537,10 @@ class MockLLMPolicy(BasePolicy):
         
         # Fallback 参数
         self._fallback_params = MetaParams(
-            w_delay=10.0,
-            w_shift=1.0,
-            w_switch=5.0,
-            freeze_horizon=12
+            w_delay=50.0,
+            w_shift=0.0,
+            w_switch=180.0,
+            freeze_horizon=0
         )
         
         # 统计
@@ -775,10 +775,10 @@ class RealLLMPolicy(BasePolicy):
         
         # Fallback 参数
         self._fallback_params = fallback_params or MetaParams(
-            w_delay=10.0,
-            w_shift=1.0,
-            w_switch=5.0,
-            freeze_horizon=12
+            w_delay=50.0,
+            w_shift=0.0,
+            w_switch=180.0,
+            freeze_horizon=0
         )
         
         # 统计
