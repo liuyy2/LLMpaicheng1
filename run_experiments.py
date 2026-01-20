@@ -980,6 +980,40 @@ def save_best_params(params: Dict[str, Any], filepath: str):
     print(f"保存最优参数: {filepath}")
 
 
+def save_seed_manifest(
+    train_assignments: List[Tuple[int, str]],
+    test_assignments: List[Tuple[int, str]],
+    filepath: str
+):
+    """保存训练/测试种子分配清单，便于跨实验对齐"""
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+
+    def summarize(assignments: List[Tuple[int, str]]) -> Dict[str, Any]:
+        counts: Dict[str, int] = {}
+        for _, level in assignments:
+            counts[level] = counts.get(level, 0) + 1
+        return {
+            "total": len(assignments),
+            "by_level": counts
+        }
+
+    data = {
+        "train": {
+            "summary": summarize(train_assignments),
+            "assignments": [{"seed": s, "disturbance_level": l} for s, l in train_assignments]
+        },
+        "test": {
+            "summary": summarize(test_assignments),
+            "assignments": [{"seed": s, "disturbance_level": l} for s, l in test_assignments]
+        }
+    }
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    print(f"保存种子清单: {filepath}")
+
+
 # ============================================================================
 # 主流程
 # ============================================================================
@@ -1013,6 +1047,8 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     
     print(f"\n训练集种子: {[a[0] for a in train_assignments[:5]]}... (共 {len(train_assignments)})")
     print(f"测试集种子: {[a[0] for a in test_assignments[:5]]}... (共 {len(test_assignments)})")
+    seed_manifest_path = os.path.join(exp_config.output_dir, "seed_manifest.json")
+    save_seed_manifest(train_assignments, test_assignments, seed_manifest_path)
     
     # 2. 网格搜索调参（只用固定策略）
     best_params, tuning_results = grid_search_tuning(
@@ -1193,6 +1229,7 @@ def run_test_only(
     print(f"测试集: {exp_config.num_test_seeds} episodes")
     print(f"参数文件: {params_path}")
     print(f"选定策略: {selected_policies}")
+    print("Note: for fair comparison, keep the same test seed count/assignment as fixed_tuned, or include fixed_tuned in the same run.")
     print(f"输出目录: {exp_config.output_dir}")
     
     # 加载最优参数
@@ -1206,7 +1243,7 @@ def run_test_only(
     print(f"\n加载的最优参数: {best_params}")
     
     # 生成测试集种子（从训练集之后开始）
-    _, test_assignments = generate_seed_assignments(
+    train_assignments, test_assignments = generate_seed_assignments(
         exp_config.num_train_seeds,  # 需要知道训练集大小以确定测试集起始种子
         exp_config.num_test_seeds,
         exp_config.disturbance_levels
@@ -1214,7 +1251,10 @@ def run_test_only(
     
     print(f"测试集种子: {[a[0] for a in test_assignments[:5]]}... (共 {len(test_assignments)})")
     
-    # 构建策略字典
+    seed_manifest_path = os.path.join(exp_config.output_dir, "seed_manifest.json")
+    save_seed_manifest(train_assignments, test_assignments, seed_manifest_path)
+
+
     all_policies = {
         "fixed_tuned": best_params,
         "fixed_default": {
