@@ -1,6 +1,0 @@
-dataset,policy_name,n,delay_mean,delay_ci95,drift_mean,drift_ci95,combined_mean,combined_ci95,on_time_mean,shifts_mean,switches_mean,solve_time_mean,vs_tuned_t_stat,vs_tuned_p_value
-train,fixed_default,60,0.0,0.0,0.00117,0.00051,0.006,0.003,1.0,2.2,0.8,14.5,,
-train,fixed_tuned,60,0.0,0.0,0.00055,0.00025,0.003,0.001,1.0,2.95,0.32,14.6,,
-train,greedy,60,0.0,0.0,0.00074,0.00023,0.004,0.001,1.0,0.8,1.07,0.0,,
-train,mockllm,60,0.0,0.0,0.00118,0.00052,0.006,0.003,1.0,2.15,0.8,14.4,,
-train,nofreeze,60,0.0,0.0,0.00115,0.0005,0.006,0.002,1.0,2.25,0.75,14.5,,

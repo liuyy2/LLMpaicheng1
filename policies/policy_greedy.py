@@ -136,7 +136,7 @@ class GreedyPolicy(BasePolicy):
         state: SimulationState,
         now: int,
         config: Config
-    ) -> Tuple[None, Plan]:
+    ) -> Tuple[Optional[MetaParams], Optional[Plan]]:
         """
         直接生成贪心计划
         
@@ -144,6 +144,14 @@ class GreedyPolicy(BasePolicy):
             (None, Plan) - 第一项为 None 表示不使用 CP-SAT
         """
         self._call_count += 1
+        if hasattr(state, 'missions') and hasattr(state, 'resources'):
+            return MetaParams(
+                w_delay=config.default_w_delay,
+                w_shift=config.default_w_shift,
+                w_switch=config.default_w_switch,
+                freeze_horizon=config.freeze_horizon
+            ), None
+
         
         # 获取需要排程的任务
         horizon_end = now + config.horizon_slots

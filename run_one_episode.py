@@ -53,7 +53,7 @@ def parse_args():
 
 def print_header():
     print("=" * 70)
-    print(" 🚀 Launch Scheduling Simulation - Single Episode")
+    print("  Launch Scheduling Simulation - Single Episode")
     print("=" * 70)
     print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
@@ -64,11 +64,14 @@ def print_scenario_info(scenario):
     print(" Scenario Information")
     print("-" * 50)
     print(f"  Seed:           {scenario.seed}")
-    print(f"  Tasks:          {len(scenario.tasks)}")
-    print(f"  Pads:           {len(scenario.pads)}")
+    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
+        print(f"  Missions:       {len(scenario.missions)}")
+        print(f"  Resources:      {len(scenario.resources)}")
+    else:
+        print(f"  Tasks:          {len(scenario.tasks)}")
+        print(f"  Pads:           {len(scenario.pads)}")
     print(f"  Disturbances:   {len(scenario.disturbance_timeline)}")
-    
-    # 统计扰动类型
+
     event_counts = {}
     for e in scenario.disturbance_timeline:
         event_counts[e.event_type] = event_counts.get(e.event_type, 0) + 1
@@ -96,27 +99,27 @@ def print_results(result):
     
     m = result.metrics
     
-    print(f"  📊 Performance Metrics:")
+    print(f"   Performance Metrics:")
     print(f"     On-time rate:     {m.on_time_rate:.2%}")
     print(f"     Total delay:      {m.total_delay} slots")
     print(f"     Avg delay:        {m.avg_delay:.2f} slots")
     print(f"     Max delay:        {m.max_delay} slots")
     print()
     
-    print(f"  📐 Stability Metrics:")
+    print(f"   Stability Metrics:")
     print(f"     Episode drift:    {m.episode_drift:.4f}")
     print(f"     Total shifts:     {m.total_shifts}")
     print(f"     Total switches:   {m.total_switches}")
     print()
     
-    print(f"  ⚙️ Solver Performance:")
+    print(f"   Solver Performance:")
     print(f"     Replans:          {m.num_replans}")
     print(f"     Forced replans:   {m.num_forced_replans}")
     print(f"     Total solve time: {m.total_solve_time_ms} ms")
     print(f"     Avg solve time:   {m.avg_solve_time_ms:.2f} ms")
     print()
     
-    print(f"  ✅ Completion:")
+    print(f"   Completion:")
     print(f"     Completed:        {m.num_completed}/{m.num_total} ({m.completion_rate:.2%})")
     print(f"     Runtime:          {result.total_runtime_s:.2f} s")
     print()
@@ -126,22 +129,30 @@ def print_schedule(result, max_show=10):
     print("-" * 50)
     print(" Final Schedule")
     print("-" * 50)
-    
+
     if not result.final_schedule:
         print("  No schedule available")
         return
-    
-    sorted_schedule = sorted(result.final_schedule, key=lambda x: x.launch_slot)
-    
-    print(f"  {'Task':<10} {'Pad':<10} {'Start':<10} {'Launch':<10}")
-    print(f"  {'-'*40}")
-    
-    for i, a in enumerate(sorted_schedule):
-        if i >= max_show:
-            print(f"  ... and {len(sorted_schedule) - max_show} more tasks")
-            break
-        print(f"  {a.task_id:<10} {a.pad_id:<10} {a.start_slot:<10} {a.launch_slot:<10}")
-    
+
+    if hasattr(result.final_schedule[0], 'op_id'):
+        sorted_schedule = sorted(result.final_schedule, key=lambda x: x.start_slot)
+        print(f"  {'Op':<12} {'Mission':<10} {'Start':<10} {'End':<10}")
+        print(f"  {'-'*48}")
+        for i, a in enumerate(sorted_schedule):
+            if i >= max_show:
+                print(f"  ... and {len(sorted_schedule) - max_show} more ops")
+                break
+            print(f"  {a.op_id:<12} {a.mission_id:<10} {a.start_slot:<10} {a.end_slot:<10}")
+    else:
+        sorted_schedule = sorted(result.final_schedule, key=lambda x: x.launch_slot)
+        print(f"  {'Task':<10} {'Pad':<10} {'Start':<10} {'Launch':<10}")
+        print(f"  {'-'*40}")
+        for i, a in enumerate(sorted_schedule):
+            if i >= max_show:
+                print(f"  ... and {len(sorted_schedule) - max_show} more tasks")
+                break
+            print(f"  {a.task_id:<10} {a.pad_id:<10} {a.start_slot:<10} {a.launch_slot:<10}")
+
     print()
 
 
@@ -161,7 +172,7 @@ def main():
     print_header()
     
     # 1. 生成场景
-    print("📦 Generating scenario...")
+    print(" Generating scenario...")
     config = DEFAULT_CONFIG
     scenario = generate_scenario(seed=args.seed, config=config)
     print_scenario_info(scenario)
@@ -176,7 +187,7 @@ def main():
     print_policy_info(policy, config)
     
     # 3. 运行仿真
-    print("🎮 Running simulation...")
+    print(" Running simulation...")
     if args.verbose:
         print()
     
@@ -188,7 +199,7 @@ def main():
     )
     
     if not args.verbose:
-        print("  ✓ Simulation complete")
+        print("   Simulation complete")
     print()
     
     # 4. 打印结果
@@ -197,7 +208,7 @@ def main():
     
     # 5. 保存日志
     output_dir = os.path.join(args.output, f"episode_{args.seed}_{policy.name}")
-    print(f"💾 Saving logs to {output_dir}...")
+    print(f" Saving logs to {output_dir}...")
     
     saved_files = save_episode_logs(result, output_dir, scenario)
     print_saved_files(saved_files, output_dir)
@@ -221,7 +232,7 @@ def main():
     print()
     
     print("=" * 70)
-    print(" ✅ Episode completed successfully!")
+    print("  Episode completed successfully!")
     print("=" * 70)
     
     return 0

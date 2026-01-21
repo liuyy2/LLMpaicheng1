@@ -8,3 +8,7 @@ results_llm_chat_30_env1/
 results_30_env1/
 results_llm_chat_30_env1_pr/
 results_30_env1_pr/
+__pycache__/
+results_test_llm/
+results_v2_2/
+logs/episode_1_fixed/

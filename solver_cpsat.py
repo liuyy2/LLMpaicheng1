@@ -44,6 +44,83 @@ class TaskAssignment:
     start_slot: int                           # 开始占用 pad 时刻 = launch - duration
     end_slot: int                             # 结束时刻 = launch_slot
 
+@dataclass
+class Operation:
+    """Operation definition (V2.1)"""
+    op_id: str
+    mission_id: str
+    op_index: int
+    duration: int
+    resources: List[str]
+    precedences: List[str]
+    time_windows: List[Tuple[int, int]] = field(default_factory=list)
+    release: int = 0
+
+
+@dataclass
+class Mission:
+    """Mission definition (V2.1)"""
+    mission_id: str
+    operations: List[Operation]
+    release: int
+    due: int
+    priority: float = 1.0
+
+    def get_operation(self, op_index: int) -> Optional[Operation]:
+        for op in self.operations:
+            if op.op_index == op_index:
+                return op
+        return None
+
+
+@dataclass
+class Resource:
+    """Resource definition (V2.1)"""
+    resource_id: str
+    capacity: int = 1
+    unavailable: List[Tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
+class OpAssignment:
+    """Operation assignment (V2.1)"""
+    op_id: str
+    mission_id: str
+    op_index: int
+    resources: List[str]
+    start_slot: int
+    end_slot: int
+
+
+@dataclass
+class PlanV2_1:
+    """Schedule plan (V2.1)"""
+    timestamp: int
+    schema_version: str = "v2_1"
+    op_assignments: List[OpAssignment] = field(default_factory=list)
+
+    def get_assignment(self, op_id: str) -> Optional[OpAssignment]:
+        for a in self.op_assignments:
+            if a.op_id == op_id:
+                return a
+        return None
+
+    def to_dict(self) -> dict:
+        return {
+            "timestamp": self.timestamp,
+            "schema_version": self.schema_version,
+            "op_assignments": [
+                {
+                    "op_id": a.op_id,
+                    "mission_id": a.mission_id,
+                    "op_index": a.op_index,
+                    "resources": a.resources,
+                    "start_slot": a.start_slot,
+                    "end_slot": a.end_slot
+                }
+                for a in self.op_assignments
+            ]
+        }
 
 @dataclass
 class Plan:
@@ -693,6 +770,226 @@ def solve(
 # ============================================================================
 # 模块测试入口
 # ============================================================================
+
+# ============================================================================
+# V2.1 Solver
+# ============================================================================
+
+
+def compute_frozen_ops(
+    current_plan: Optional[PlanV2_1],
+    now: int,
+    freeze_horizon: int,
+    started_ops: Optional[Set[str]] = None,
+    completed_ops: Optional[Set[str]] = None
+) -> Dict[str, OpAssignment]:
+    if current_plan is None:
+        return {}
+
+    if started_ops is None:
+        started_ops = set()
+    if completed_ops is None:
+        completed_ops = set()
+
+    frozen = {}
+    freeze_end = now + freeze_horizon
+
+    for assignment in current_plan.op_assignments:
+        op_id = assignment.op_id
+
+        if op_id in completed_ops:
+            continue
+
+        if op_id in started_ops:
+            frozen[op_id] = assignment
+            continue
+
+        if assignment.start_slot > now and assignment.start_slot <= freeze_end:
+            frozen[op_id] = assignment
+
+    return frozen
+
+
+@dataclass
+class SolverConfigV2_1:
+    """V2.1 solver config"""
+    horizon_slots: int = 336
+    w_delay: float = 10.0
+    w_shift: float = 1.0
+    w_switch: float = 5.0
+    time_limit_seconds: float = 60.0
+    num_workers: int = 4
+
+
+def solve_v2_1(
+    missions: List[Mission],
+    resources: List[Resource],
+    horizon: int,
+    prev_plan: Optional[PlanV2_1] = None,
+    frozen_ops: Optional[Dict[str, OpAssignment]] = None,
+    config: Optional[SolverConfigV2_1] = None
+) -> SolverResult:
+    if config is None:
+        config = SolverConfigV2_1(horizon_slots=horizon)
+    if frozen_ops is None:
+        frozen_ops = {}
+
+    start_time = time.time()
+    result = _solve_v2_1_with_config(missions, resources, horizon, prev_plan, frozen_ops, config)
+    result.solve_time_ms = int((time.time() - start_time) * 1000)
+    return result
+
+
+def _solve_v2_1_with_config(
+    missions: List[Mission],
+    resources: List[Resource],
+    horizon: int,
+    prev_plan: Optional[PlanV2_1],
+    frozen_ops: Dict[str, OpAssignment],
+    config: SolverConfigV2_1
+) -> SolverResult:
+    if not missions:
+        return SolverResult(
+            status=SolveStatus.OPTIMAL,
+            plan=PlanV2_1(timestamp=0, op_assignments=[]),
+            objective_value=0.0
+        )
+
+    model = cp_model.CpModel()
+
+    all_ops = []
+    for mission in missions:
+        all_ops.extend(mission.operations)
+
+    start_vars: Dict[str, cp_model.IntVar] = {}
+    end_vars: Dict[str, cp_model.IntVar] = {}
+    interval_vars: Dict[str, cp_model.IntervalVar] = {}
+
+    for op in all_ops:
+        start_vars[op.op_id] = model.NewIntVar(
+            op.release, horizon, f"start_{op.op_id}"
+        )
+        end_vars[op.op_id] = model.NewIntVar(
+            op.release + op.duration, horizon + op.duration, f"end_{op.op_id}"
+        )
+        model.Add(end_vars[op.op_id] == start_vars[op.op_id] + op.duration)
+        interval_vars[op.op_id] = model.NewIntervalVar(
+            start_vars[op.op_id],
+            op.duration,
+            end_vars[op.op_id],
+            f"interval_{op.op_id}"
+        )
+
+    for op in all_ops:
+        for pred_id in op.precedences:
+            if pred_id in end_vars:
+                model.Add(start_vars[op.op_id] >= end_vars[pred_id])
+
+    resource_intervals: Dict[str, List[cp_model.IntervalVar]] = {
+        r.resource_id: [] for r in resources
+    }
+
+    for op in all_ops:
+        for res_id in op.resources:
+            if res_id in resource_intervals:
+                resource_intervals[res_id].append(interval_vars[op.op_id])
+
+    for resource in resources:
+        for closure_idx, (cs, ce) in enumerate(resource.unavailable):
+            duration = ce - cs + 1
+            try:
+                blocker = model.NewFixedSizedIntervalVar(
+                    cs, duration, f"closure_{resource.resource_id}_{closure_idx}"
+                )
+            except AttributeError:
+                blocker = model.NewFixedSizeIntervalVar(
+                    cs, duration, f"closure_{resource.resource_id}_{closure_idx}"
+                )
+            resource_intervals[resource.resource_id].append(blocker)
+
+    for res_id, intervals in resource_intervals.items():
+        if intervals:
+            model.AddNoOverlap(intervals)
+
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        if not op6 or not op6.time_windows:
+            continue
+        window_choice = []
+        for win_idx, (ws, we) in enumerate(op6.time_windows):
+            in_window = model.NewBoolVar(f"op6_{op6.op_id}_window_{win_idx}")
+            window_choice.append(in_window)
+            model.Add(start_vars[op6.op_id] >= ws).OnlyEnforceIf(in_window)
+            model.Add(end_vars[op6.op_id] <= we).OnlyEnforceIf(in_window)
+        model.AddExactlyOne(window_choice)
+
+    for op_id, frozen in frozen_ops.items():
+        if op_id in start_vars:
+            model.Add(start_vars[op_id] == frozen.start_slot)
+            model.Add(end_vars[op_id] == frozen.end_slot)
+
+    objective_terms = []
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        if not op6 or op6.op_id not in end_vars:
+            continue
+        delay_var = model.NewIntVar(0, horizon, f"delay_{mission.mission_id}")
+        model.AddMaxEquality(delay_var, [0, end_vars[op6.op_id] - mission.due])
+        weight = int(config.w_delay * mission.priority * 100)
+        objective_terms.append(weight * delay_var)
+
+    if objective_terms:
+        model.Minimize(sum(objective_terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = config.time_limit_seconds
+    solver.parameters.num_search_workers = config.num_workers
+
+    status = solver.Solve(model)
+
+    if status == cp_model.OPTIMAL:
+        solve_status = SolveStatus.OPTIMAL
+    elif status == cp_model.FEASIBLE:
+        solve_status = SolveStatus.FEASIBLE
+    elif status == cp_model.INFEASIBLE:
+        return SolverResult(
+            status=SolveStatus.INFEASIBLE,
+            plan=None,
+            num_variables=model.Proto().variables.__len__(),
+            num_constraints=model.Proto().constraints.__len__()
+        )
+    else:
+        return SolverResult(
+            status=SolveStatus.TIMEOUT,
+            plan=None,
+            num_variables=model.Proto().variables.__len__(),
+            num_constraints=model.Proto().constraints.__len__()
+        )
+
+    op_assignments = []
+    for op in all_ops:
+        if op.op_id in start_vars:
+            start = solver.Value(start_vars[op.op_id])
+            end = solver.Value(end_vars[op.op_id])
+            op_assignments.append(OpAssignment(
+                op_id=op.op_id,
+                mission_id=op.mission_id,
+                op_index=op.op_index,
+                resources=op.resources,
+                start_slot=start,
+                end_slot=end
+            ))
+
+    plan = PlanV2_1(timestamp=0, op_assignments=op_assignments)
+
+    return SolverResult(
+        status=solve_status,
+        plan=plan,
+        objective_value=solver.ObjectiveValue() / 100.0 if objective_terms else 0.0,
+        num_variables=model.Proto().variables.__len__(),
+        num_constraints=model.Proto().constraints.__len__()
+    )
+
 
 if __name__ == "__main__":
     # 简单自测

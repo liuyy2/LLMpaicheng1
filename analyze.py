@@ -56,6 +56,8 @@ class EpisodeRecord:
     on_time_rate: float
     avg_delay: float
     max_delay: int
+    weighted_tardiness: float
+    resource_utilization: float
     episode_drift: float
     
     # 稳定性
@@ -102,6 +104,8 @@ def load_episode_results(filepath: str) -> List[EpisodeRecord]:
                 on_time_rate=float(row['on_time_rate']),
                 avg_delay=float(row['avg_delay']),
                 max_delay=int(row['max_delay']),
+                weighted_tardiness=float(row.get('weighted_tardiness', 0.0)),
+                resource_utilization=float(row.get('resource_utilization', 0.0)),
                 episode_drift=float(row['episode_drift']),
                 total_shifts=int(row['total_shifts']),
                 total_switches=int(row['total_switches']),
@@ -234,6 +238,8 @@ def compute_summary_stats(
         delays = [r.avg_delay for r in recs]
         drifts = [r.episode_drift for r in recs]
         on_times = [r.on_time_rate for r in recs]
+        weighted_tardinesses = [r.weighted_tardiness for r in recs]
+        resource_utils = [r.resource_utilization for r in recs]
         shifts = [r.total_shifts for r in recs]
         switches = [r.total_switches for r in recs]
         replans = [r.num_replans for r in recs]
@@ -276,6 +282,10 @@ def compute_summary_stats(
             "combined_mean": mean(combined),
             "combined_ci95": ci95(combined),
             "on_time_mean": mean(on_times),
+            "mean_weighted_tardiness": mean(weighted_tardinesses),
+            "CI_weighted_tardiness": ci95(weighted_tardinesses),
+            "mean_resource_utilization": mean(resource_utils),
+            "CI_resource_utilization": ci95(resource_utils),
             
             # 稳定性
             "mean_replans": mean(replans),
@@ -576,7 +586,7 @@ def plot_policy_comparison_bars(
     values = [filtered[(dataset, p)].get(metric, 0) for p in policy_names]
     
     # CI 如果有
-    ci_keys = ["CI_delay", "CI_drift", "combined_ci95"]
+    metric_ci_map = {"mean_delay": "CI_delay", "mean_drift": "CI_drift", "combined_mean": "combined_ci95", "mean_weighted_tardiness": "CI_weighted_tardiness", "mean_resource_utilization": "CI_resource_utilization"}
     cis = []
     for p in policy_names:
         s = filtered[(dataset, p)]
@@ -665,6 +675,162 @@ def plot_metric_by_disturbance(
     print(f"保存图表: {output_path}")
 
 
+def _find_rolling_logs(input_dir):
+    log_paths = []
+    for root, _, files in os.walk(input_dir):
+        for name in files:
+            if name == 'rolling_log.jsonl':
+                log_paths.append(os.path.join(root, name))
+    return log_paths
+
+
+def _bucket_value(value, bins):
+    for i in range(len(bins) - 1):
+        if bins[i] <= value < bins[i + 1]:
+            return f"[{bins[i]}, {bins[i+1]})"
+    return f"[{bins[-2]}, {bins[-1]}+)"
+
+
+def build_feature_bucket_table(input_dir):
+    feature_bins = {
+        'window_loss_pct': [0.0, 0.05, 0.1, 0.2, 0.4, 1.0, float('inf')],
+        'pad_pressure': [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, float('inf')],
+        'slack_min_minutes': [float('-inf'), 0.0, 60.0, 120.0, 240.0, float('inf')],
+        'resource_conflict_pressure': [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, float('inf')],
+        'delay_increase_minutes': [0.0, 5.0, 15.0, 30.0, 60.0, 120.0, float('inf')]
+    }
+
+    bucket_stats = defaultdict(lambda: {
+        'count': 0,
+        'plan_drift': 0.0,
+        'num_shifts': 0,
+        'num_switches': 0,
+        'infeasible': 0
+    })
+
+    for log_path in _find_rolling_logs(input_dir):
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                features = entry.get('state_features')
+                metrics = entry.get('metrics', {})
+                if not isinstance(features, dict):
+                    continue
+
+                plan_drift = float(metrics.get('plan_drift', 0.0))
+                num_shifts = int(metrics.get('num_shifts', 0))
+                num_switches = int(metrics.get('num_switches', 0))
+                is_feasible = metrics.get('is_feasible', True)
+                infeasible = 0 if is_feasible else 1
+
+                for feature_name, bins in feature_bins.items():
+                    if feature_name not in features:
+                        continue
+                    value = float(features.get(feature_name, 0.0))
+                    bucket = _bucket_value(value, bins)
+                    key = (feature_name, bucket)
+                    stat = bucket_stats[key]
+                    stat['count'] += 1
+                    stat['plan_drift'] += plan_drift
+                    stat['num_shifts'] += num_shifts
+                    stat['num_switches'] += num_switches
+                    stat['infeasible'] += infeasible
+
+    rows = []
+    for (feature, bucket), stat in sorted(bucket_stats.items()):
+        count = stat['count']
+        if count == 0:
+            continue
+        rows.append({
+            'feature': feature,
+            'bucket': bucket,
+            'count': count,
+            'avg_plan_drift': round(stat['plan_drift'] / count, 6),
+            'avg_num_shifts': round(stat['num_shifts'] / count, 2),
+            'avg_num_switches': round(stat['num_switches'] / count, 2),
+            'infeasible_rate': round(stat['infeasible'] / count, 4)
+        })
+
+    return rows
+
+
+def save_feature_bucket_table(input_dir, output_path):
+    rows = build_feature_bucket_table(input_dir)
+    if not rows:
+        print('No rolling logs with state_features found for bucket table')
+        return
+
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    fieldnames = [
+        'feature', 'bucket', 'count',
+        'avg_plan_drift', 'avg_num_shifts', 'avg_num_switches', 'infeasible_rate'
+    ]
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Saved bucket table: {output_path}")
+
+
+def _find_final_schedule(input_dir):
+    for root, _, files in os.walk(input_dir):
+        if 'final_schedule.json' in files:
+            return os.path.join(root, 'final_schedule.json')
+    return None
+
+
+def plot_gantt_from_schedule(input_dir, output_path, max_items=120):
+    schedule_path = _find_final_schedule(input_dir)
+    if not schedule_path:
+        print('No final_schedule.json found for Gantt plot')
+        return
+
+    with open(schedule_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    schedule = data.get('schedule', [])
+    if not schedule:
+        print('No schedule entries found for Gantt plot')
+        return
+
+    items = []
+    for entry in schedule:
+        start = entry.get('start_slot')
+        end = entry.get('end_slot')
+        label = entry.get('op_id') or entry.get('task_id') or entry.get('id')
+        if start is None or end is None or label is None:
+            continue
+        items.append((label, start, end))
+
+    items.sort(key=lambda x: x[1])
+    items = items[:max_items]
+
+    labels = [i[0] for i in items]
+    starts = [i[1] for i in items]
+    durations = [max(0, i[2] - i[1]) for i in items]
+
+    fig, ax = plt.subplots(figsize=(12, max(4, len(items) * 0.2)))
+    y_positions = range(len(items))
+    ax.barh(y_positions, durations, left=starts, color='#3498db', alpha=0.8)
+    ax.set_yticks(list(y_positions))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel('Slot')
+    ax.set_title('Gantt Chart (sample schedule)')
+    ax.grid(True, axis='x', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved Gantt chart: {output_path}")
+
 def plot_tuning_heatmap(
     tuning_results: List[Dict[str, Any]],
     output_path: str
@@ -740,6 +906,8 @@ def save_summary_csv(
         "mean_drift", "CI_drift",
         "combined_mean", "combined_ci95",
         "on_time_mean",
+        "mean_weighted_tardiness", "CI_weighted_tardiness",
+        "mean_resource_utilization", "CI_resource_utilization",
         "mean_replans", "mean_switch", "mean_shifts",
         "mean_solver_time_ms", "mean_wall_time_ms",
         "fallback_rate", "cache_hit_rate",
@@ -831,6 +999,8 @@ def save_enhanced_summary_with_tests(
         "mean_drift", "CI_drift",
         "combined_mean", "combined_ci95",
         "on_time_mean",
+        "mean_weighted_tardiness", "CI_weighted_tardiness",
+        "mean_resource_utilization", "CI_resource_utilization",
         "mean_replans", "mean_switch",
         "mean_solver_time_ms", "mean_wall_time_ms",
         "fallback_rate", "cache_hit_rate",
@@ -1195,6 +1365,22 @@ def run_analysis(
         metric="mean_delay",
         ylabel="Average Delay (slots)"
     )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_weighted_tardiness.png"),
+        dataset=primary_dataset,
+        metric="mean_weighted_tardiness",
+        ylabel="Weighted Tardiness"
+    )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_resource_utilization.png"),
+        dataset=primary_dataset,
+        metric="mean_resource_utilization",
+        ylabel="Resource Utilization"
+    )
     
     plot_metric_by_disturbance(
         records,
@@ -1218,6 +1404,10 @@ def run_analysis(
             tuning_results,
             os.path.join(output_dir, "tuning_heatmap.png")
         )
+
+    # Feature buckets and Gantt chart (if logs exist)
+    save_feature_bucket_table(input_dir, os.path.join(output_dir, "feature_bucket_table.csv"))
+    plot_gantt_from_schedule(input_dir, os.path.join(output_dir, "gantt_chart.png"))
     
     # 7. LLM Reliability Report（如果有 llm_real 数据）
     if "llm_real" in available_policies:

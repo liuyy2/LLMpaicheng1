@@ -102,6 +102,7 @@ def test_csv_output():
     record = EpisodeMetricsRecord(
         seed=1, disturbance_level="light", policy_name="test", dataset="test",
         completed=10, total=10, on_time_rate=1.0, avg_delay=0.0, max_delay=0,
+        weighted_tardiness=0.0, resource_utilization=0.0,
         episode_drift=0.001, total_shifts=2, total_switches=1,
         num_replans=5, num_forced_replans=0, avg_solve_time_ms=100.0,
         total_runtime_s=1.0,

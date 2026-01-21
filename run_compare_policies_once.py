@@ -1,13 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-单次策略对比脚本 - 同一个 scenario seed 运行所有策略，打印指标对比
-
-用法:
-    python run_compare_policies_once.py --seed 42
-    python run_compare_policies_once.py --seed 42 --verbose
-    python run_compare_policies_once.py --seed 42 --output results/compare_42.json
-"""
 
 import argparse
 import json
@@ -32,7 +24,6 @@ from policies import (
 
 @dataclass
 class PolicyComparisonResult:
-    """单策略对比结果"""
     policy_name: str
     completed: int
     total: int
@@ -71,29 +62,18 @@ def run_policy_comparison(
     verbose: bool = False,
     output_dir: str = None
 ) -> List[PolicyComparisonResult]:
-    """
-    运行策略对比
-    
-    Args:
-        seed: 场景随机种子
-        config: 配置
-        verbose: 是否打印详细信息
-        output_dir: 日志输出目录（可选）
-    
-    Returns:
-        各策略的对比结果列表
-    """
-    # 1. 生成场景
-    print(f"\n{'='*70}")
-    print(f" 策略对比实验 - Seed: {seed}")
-    print(f"{'='*70}")
-    
+    # 1. Generate scenario
     scenario = generate_scenario(seed=seed, config=config)
-    print(f"\n场景生成完成:")
-    print(f"  - 任务数: {len(scenario.tasks)}")
-    print(f"  - Pad 数: {len(scenario.pads)}")
-    print(f"  - 扰动事件数: {len(scenario.disturbance_timeline)}")
-    
+    print("")
+    print("Scenario generated:")
+    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
+        print(f"  - Missions: {len(scenario.missions)}")
+        print(f"  - Resources: {len(scenario.resources)}")
+    else:
+        print(f"  - Tasks: {len(scenario.tasks)}")
+        print(f"  - Pads: {len(scenario.pads)}")
+    print(f"  - Disturbance events: {len(scenario.disturbance_timeline)}")
+
     # 2. 定义策略
     policies = [
         FixedWeightPolicy(
@@ -185,7 +165,7 @@ def run_policy_comparison(
             # 创建空结果
             results.append(PolicyComparisonResult(
                 policy_name=policy.name,
-                completed=0, total=len(scenario.tasks),
+                completed=0, total=len(scenario.missions) if getattr(scenario, 'schema_version', 'v1') == 'v2_1' else len(scenario.tasks),
                 on_time_rate=0.0, avg_delay=float('inf'),
                 max_delay=0, episode_drift=0.0,
                 total_shifts=0, total_switches=0,
@@ -198,7 +178,6 @@ def run_policy_comparison(
 
 
 def print_comparison_table(results: List[PolicyComparisonResult]):
-    """打印对比表格"""
     print(f"\n{'='*70}")
     print(f" 策略对比结果汇总")
     print(f"{'='*70}")
@@ -270,7 +249,6 @@ def save_comparison_results(
     filepath: str,
     seed: int
 ):
-    """保存对比结果到文件"""
     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
     
     output = {

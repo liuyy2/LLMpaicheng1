@@ -2,18 +2,19 @@
 配置模块 - 全局常量与默认配置
 """
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Tuple, List
 
 
 @dataclass
 class Config:
     """全局配置"""
+    schema_version: str = "v2_1"             # "v1" | "v2_1"
     # 时间离散化
     slot_minutes: int = 10
     rolling_interval: int = 6                 # slots (60min)
     horizon_slots: int = 144                  # 24h
-    sim_total_slots: int = 432                # 72h
+    sim_total_slots: int = 720                # 120h
     
     # 冻结
     freeze_horizon: int = 12                  # 2h = 12 slots
@@ -43,6 +44,18 @@ class Config:
     num_tasks_range: Tuple[int, int] = (20, 30)
     num_pads: int = 2
     windows_per_task_range: Tuple[int, int] = (1, 2)
+
+    # ========== V2.1 ???? ==========
+    resource_ids: List[str] = field(default_factory=lambda: [
+        "R_pad", "R1", "R2", "R3", "R4"
+    ])
+    num_missions_range: Tuple[int, int] = (15, 20)
+    ops_per_mission: int = 6
+    op_duration_range: Tuple[int, int] = (4, 12)
+    op6_windows_range: Tuple[int, int] = (2, 4)
+    op6_window_length_range: Tuple[int, int] = (4, 12)
+    closure_count_range: Tuple[int, int] = (1, 3)
+    closure_duration_hours_range: Tuple[int, int] = (6, 24)
 
 
 # 默认配置实例

@@ -32,7 +32,42 @@ from policies.base import BasePolicy, MetaParams
 from disturbance import SimulationState
 from config import Config
 from solver_cpsat import Plan
-from features import compute_state_features, StateFeatures
+from features import compute_state_features, compute_state_features_ops, StateFeatures
+
+
+def _compute_state_features_for_policy(
+    state: SimulationState,
+    now: int,
+    config: Config,
+    prev_window_slots: Optional[Dict[str, Set[int]]],
+    recent_shifts: int,
+    recent_switches: int
+) -> Tuple[StateFeatures, Dict[str, Set[int]]]:
+    if hasattr(state, 'missions') and hasattr(state, 'resources'):
+        return compute_state_features_ops(
+            missions=state.missions,
+            resources=state.resources,
+            current_plan=state.current_plan,
+            now=now,
+            config=config,
+            completed_ops=getattr(state, 'completed_ops', set()),
+            prev_window_slots=prev_window_slots,
+            recent_shifts=recent_shifts,
+            recent_switches=recent_switches
+        )
+
+    return compute_state_features(
+        tasks=state.tasks,
+        pads=state.pads,
+        current_plan=state.current_plan,
+        now=now,
+        config=config,
+        completed_tasks=state.completed_tasks,
+        prev_window_slots=prev_window_slots,
+        recent_shifts=recent_shifts,
+        recent_switches=recent_switches
+    )
+
 
 
 # ============================================================================
@@ -567,13 +602,10 @@ class MockLLMPolicy(BasePolicy):
         self._call_count += 1
         
         # 1. 计算特征
-        features, curr_window_slots = compute_state_features(
-            tasks=state.tasks,
-            pads=state.pads,
-            current_plan=state.current_plan,
+        features, curr_window_slots = _compute_state_features_for_policy(
+            state=state,
             now=now,
             config=config,
-            completed_tasks=state.completed_tasks,
             prev_window_slots=self._prev_window_slots,
             recent_shifts=self._recent_shifts,
             recent_switches=self._recent_switches
@@ -824,13 +856,10 @@ class RealLLMPolicy(BasePolicy):
         self._call_count += 1
         
         # 1. 计算特征
-        features, curr_window_slots = compute_state_features(
-            tasks=state.tasks,
-            pads=state.pads,
-            current_plan=state.current_plan,
+        features, curr_window_slots = _compute_state_features_for_policy(
+            state=state,
             now=now,
             config=config,
-            completed_tasks=state.completed_tasks,
             prev_window_slots=self._prev_window_slots,
             recent_shifts=self._recent_shifts,
             recent_switches=self._recent_switches

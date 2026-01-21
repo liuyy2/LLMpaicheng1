@@ -30,12 +30,12 @@ import itertools
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any, Tuple, Optional, Set
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
 from config import Config, DEFAULT_CONFIG
 from scenario import generate_scenario, Scenario
-from simulator import simulate_episode, EpisodeResult
+from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
     FixedWeightPolicy, NoFreezePolicy, GreedyPolicy, MockLLMPolicy,
     create_policy
@@ -151,6 +151,8 @@ class EpisodeMetricsRecord:
     on_time_rate: float
     avg_delay: float
     max_delay: int
+    weighted_tardiness: float
+    resource_utilization: float
     episode_drift: float
     
     # 稳定性
@@ -230,6 +232,7 @@ def create_config_for_disturbance(level: str, solver_timeout: float = 10.0) -> C
     params = DISTURBANCE_CONFIGS.get(level, DISTURBANCE_CONFIGS["medium"])
     
     return Config(
+        schema_version=DEFAULT_CONFIG.schema_version,
         p_weather=params["p_weather"],
         p_pad_outage=params["p_pad_outage"],
         sigma_duration=params["sigma_duration"],
@@ -393,6 +396,12 @@ def run_single_episode(
     
     # 运行仿真
     result = simulate_episode(policy, scenario, config, verbose=False)
+
+    # save rolling log/final schedule for batch analysis
+    if output_dir:
+        log_dir = os.path.join(output_dir, "logs", episode_id)
+        save_episode_logs(result, log_dir, scenario)
+
     
     # 收集 LLM 统计（如果是 LLM 策略）
     llm_calls = 0
@@ -451,6 +460,8 @@ def run_single_episode(
         on_time_rate=m.on_time_rate,
         avg_delay=m.avg_delay,
         max_delay=m.max_delay,
+        weighted_tardiness=m.weighted_tardiness,
+        resource_utilization=m.resource_utilization,
         episode_drift=m.episode_drift,
         total_shifts=m.total_shifts,
         total_switches=m.total_switches,
@@ -619,14 +630,11 @@ def grid_search_tuning(
         drifts = []
         solve_times = []
         
-        with ProcessPoolExecutor(max_workers=exp_config.max_workers) as executor:
-            futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
-            
+        if exp_config.max_workers <= 1:
             completed = 0
-            for future in as_completed(futures):
-                task = futures[future]
+            for task in tasks:
                 try:
-                    record = future.result()
+                    record = run_single_episode_wrapper(task)
                     delays.append(record.avg_delay)
                     drifts.append(record.episode_drift)
                     solve_times.append(record.avg_solve_time_ms)
@@ -634,15 +642,36 @@ def grid_search_tuning(
                     seed = task[0]
                     if verbose:
                         print(f"  Warning: seed {seed} failed: {e}")
-                    delays.append(100.0)  # 惩罚值
+                    delays.append(100.0)
                     drifts.append(1.0)
                     solve_times.append(0.0)
-                
+
                 completed += 1
                 if verbose and completed % 10 == 0:
-                    print(f"  进度: {completed}/{len(tasks)}")
-        
-        # 计算平均值
+                    print(f"  ??: {completed}/{len(tasks)}")
+        else:
+            with ThreadPoolExecutor(max_workers=exp_config.max_workers) as executor:
+                futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
+
+                completed = 0
+                for future in as_completed(futures):
+                    task = futures[future]
+                    try:
+                        record = future.result()
+                        delays.append(record.avg_delay)
+                        drifts.append(record.episode_drift)
+                        solve_times.append(record.avg_solve_time_ms)
+                    except Exception as e:
+                        seed = task[0]
+                        if verbose:
+                            print(f"  Warning: seed {seed} failed: {e}")
+                        delays.append(100.0)
+                        drifts.append(1.0)
+                        solve_times.append(0.0)
+
+                    completed += 1
+                    if verbose and completed % 10 == 0:
+                        print(f"  ??: {completed}/{len(tasks)}")
         avg_delay = sum(delays) / len(delays) if delays else float('inf')
         avg_drift = sum(drifts) / len(drifts) if drifts else float('inf')
         avg_solve = sum(solve_times) / len(solve_times) if solve_times else 0.0
@@ -749,28 +778,44 @@ def run_evaluation(
         
         total = len(tasks)
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
-            
+        if max_workers <= 1:
             completed = 0
-            for future in as_completed(futures):
-                task = futures[future]
+            for task in tasks:
                 seed, level, policy_name = task[0], task[1], task[2]
-                
                 try:
-                    record = future.result()
+                    record = run_single_episode_wrapper(task)
                     all_records.append(record)
                 except Exception as e:
                     logger.error(f"Error: seed={seed}, policy={policy_name}: {e}")
-                    # 记录失败
                     all_records.append(_create_failed_record(
                         seed, level, policy_name, dataset
                     ))
-                
+
                 completed += 1
                 if verbose and completed % 50 == 0:
-                    print(f"  进度: {completed}/{total}")
-        
+                    print(f"  ??: {completed}/{total}")
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
+
+                completed = 0
+                for future in as_completed(futures):
+                    task = futures[future]
+                    seed, level, policy_name = task[0], task[1], task[2]
+
+                    try:
+                        record = future.result()
+                        all_records.append(record)
+                    except Exception as e:
+                        logger.error(f"Error: seed={seed}, policy={policy_name}: {e}")
+                        # ????
+                        all_records.append(_create_failed_record(
+                            seed, level, policy_name, dataset
+                        ))
+
+                    completed += 1
+                    if verbose and completed % 50 == 0:
+                        print(f"  ??: {completed}/{total}")
         if verbose:
             print(f"  完成: {total}/{total}")
     
@@ -828,6 +873,7 @@ def _create_failed_record(
         dataset=dataset,
         completed=0, total=0,
         on_time_rate=0.0, avg_delay=float('inf'), max_delay=0,
+        weighted_tardiness=0.0, resource_utilization=0.0,
         episode_drift=0.0, total_shifts=0, total_switches=0,
         num_replans=0, num_forced_replans=0,
         avg_solve_time_ms=0.0, total_runtime_s=0.0,
@@ -848,7 +894,7 @@ def save_episode_results(records: List[EpisodeMetricsRecord], filepath: str):
     
     fieldnames = [
         "seed", "disturbance_level", "policy_name", "dataset",
-        "completed", "total", "on_time_rate", "avg_delay", "max_delay",
+        "completed", "total", "on_time_rate", "avg_delay", "max_delay", "weighted_tardiness", "resource_utilization",
         "episode_drift", "total_shifts", "total_switches",
         "num_replans", "num_forced_replans", "avg_solve_time_ms", "total_runtime_s",
         # LLM 相关字段
@@ -1348,6 +1394,8 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 on_time_rate=float(row['on_time_rate']),
                 avg_delay=float(row['avg_delay']),
                 max_delay=int(row['max_delay']),
+                weighted_tardiness=float(row.get('weighted_tardiness', 0.0)),
+                resource_utilization=float(row.get('resource_utilization', 0.0)),
                 episode_drift=float(row['episode_drift']),
                 total_shifts=int(row['total_shifts']),
                 total_switches=int(row['total_switches']),
