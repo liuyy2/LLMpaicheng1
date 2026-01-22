@@ -249,7 +249,10 @@ def generate_missions_v2_1(
 
         for op_idx in range(1, 7):
             op_id = f"{mission_id}_Op{op_idx}"
-            duration = rng.randint(*config.op_duration_range)
+            if op_idx == 5:
+                duration = 0
+            else:
+                duration = rng.randint(*config.op_duration_range)
             cumulative_duration += duration
 
             if op_idx == 1:
@@ -312,20 +315,25 @@ def _generate_op6_windows(
     config: Config
 ) -> List[Tuple[int, int]]:
     num_windows = rng.randint(*config.op6_windows_range)
+    min_extra = max(0, config.op6_window_length_range[0])
+    max_extra = max(min_extra, config.op6_window_length_range[1])
 
     earliest_start = release + cumulative_duration - op6_duration
     latest_end = min(sim_total - 1, earliest_start + int(sim_total * 0.8))
 
     available_span = latest_end - earliest_start
-    if available_span < num_windows * (op6_duration + 4):
-        latest_end = min(sim_total - 1, earliest_start + num_windows * (op6_duration + 10))
+    if available_span < num_windows * (op6_duration + min_extra):
+        latest_end = min(
+            sim_total - 1,
+            earliest_start + num_windows * (op6_duration + max_extra)
+        )
 
     windows = []
     segment_size = (latest_end - earliest_start) // max(1, num_windows)
 
     for w in range(num_windows):
         segment_center = earliest_start + segment_size * w + segment_size // 2
-        window_length = op6_duration + rng.randint(2, 6)
+        window_length = op6_duration + rng.randint(min_extra, max_extra)
 
         window_start = max(earliest_start, segment_center - window_length // 2)
         window_end = min(latest_end, window_start + window_length)
@@ -335,7 +343,7 @@ def _generate_op6_windows(
 
     if not windows:
         window_start = earliest_start + 5
-        window_end = min(latest_end, window_start + op6_duration + 4)
+        window_end = min(latest_end, window_start + op6_duration + max(2, min_extra))
         windows = [(window_start, window_end)]
 
     return windows

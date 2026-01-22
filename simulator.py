@@ -262,6 +262,8 @@ def _apply_duration_disturbance_ops(state: SimulationStateOps, event: Disturbanc
 
     op = state.get_operation(op_id)
     if op and op_id not in state.started_ops:
+        if op.op_index in (5, 6):
+            return
         new_duration = max(1, int(round(op.duration * multiplier)))
         state.actual_durations[op_id] = new_duration
         op.duration = new_duration
@@ -330,7 +332,7 @@ def _check_plan_feasibility_ops(
                 infeasible.append(f'release_{op.op_id}')
                 return False, infeasible
 
-            if assign.end_slot - assign.start_slot != op.duration:
+            if op.op_index != 5 and assign.end_slot - assign.start_slot != op.duration:
                 infeasible.append(f'duration_{op.op_id}')
                 return False, infeasible
 
@@ -681,7 +683,11 @@ def _simulate_episode_v2_1(
                 w_shift=weights[1],
                 w_switch=weights[2],
                 time_limit_seconds=config.solver_timeout_s,
-                num_workers=config.solver_num_workers
+                num_workers=config.solver_num_workers,
+                op5_max_wait_slots=max(
+                    0,
+                    int(round(config.op5_max_wait_hours * 60 / config.slot_minutes))
+                )
             )
 
             result = solve_v2_1(

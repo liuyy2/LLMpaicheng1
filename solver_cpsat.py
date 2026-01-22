@@ -819,6 +819,7 @@ class SolverConfigV2_1:
     w_switch: float = 5.0
     time_limit_seconds: float = 60.0
     num_workers: int = 4
+    op5_max_wait_slots: int = 144
 
 
 def solve_v2_1(
@@ -865,26 +866,55 @@ def _solve_v2_1_with_config(
     end_vars: Dict[str, cp_model.IntVar] = {}
     interval_vars: Dict[str, cp_model.IntervalVar] = {}
 
+    op5_max_wait_slots = max(0, config.op5_max_wait_slots)
     for op in all_ops:
         start_vars[op.op_id] = model.NewIntVar(
             op.release, horizon, f"start_{op.op_id}"
         )
-        end_vars[op.op_id] = model.NewIntVar(
-            op.release + op.duration, horizon + op.duration, f"end_{op.op_id}"
-        )
-        model.Add(end_vars[op.op_id] == start_vars[op.op_id] + op.duration)
-        interval_vars[op.op_id] = model.NewIntervalVar(
-            start_vars[op.op_id],
-            op.duration,
-            end_vars[op.op_id],
-            f"interval_{op.op_id}"
-        )
+        if op.op_index == 5:
+            min_duration = max(0, op.duration)
+            max_duration = min_duration + op5_max_wait_slots
+            duration_var = model.NewIntVar(
+                min_duration, max_duration, f"dur_{op.op_id}"
+            )
+            end_vars[op.op_id] = model.NewIntVar(
+                op.release + min_duration, horizon + max_duration, f"end_{op.op_id}"
+            )
+            model.Add(end_vars[op.op_id] == start_vars[op.op_id] + duration_var)
+            interval_vars[op.op_id] = model.NewIntervalVar(
+                start_vars[op.op_id],
+                duration_var,
+                end_vars[op.op_id],
+                f"interval_{op.op_id}"
+            )
+        else:
+            end_vars[op.op_id] = model.NewIntVar(
+                op.release + op.duration, horizon + op.duration, f"end_{op.op_id}"
+            )
+            model.Add(end_vars[op.op_id] == start_vars[op.op_id] + op.duration)
+            interval_vars[op.op_id] = model.NewIntervalVar(
+                start_vars[op.op_id],
+                op.duration,
+                end_vars[op.op_id],
+                f"interval_{op.op_id}"
+            )
 
     for op in all_ops:
         for pred_id in op.precedences:
             if pred_id in end_vars:
                 model.Add(start_vars[op.op_id] >= end_vars[pred_id])
 
+    # Pad holding: Op4 -> Op5 -> Op6 must be contiguous
+    for mission in missions:
+        op4 = mission.get_operation(4)
+        op5 = mission.get_operation(5)
+        op6 = mission.get_operation(6)
+        if not op4 or not op5 or not op6:
+            continue
+        if op4.op_id in end_vars and op5.op_id in start_vars:
+            model.Add(start_vars[op5.op_id] == end_vars[op4.op_id])
+        if op5.op_id in end_vars and op6.op_id in start_vars:
+            model.Add(start_vars[op6.op_id] == end_vars[op5.op_id])
     resource_intervals: Dict[str, List[cp_model.IntervalVar]] = {
         r.resource_id: [] for r in resources
     }

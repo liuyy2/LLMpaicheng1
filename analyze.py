@@ -586,17 +586,20 @@ def plot_policy_comparison_bars(
     values = [filtered[(dataset, p)].get(metric, 0) for p in policy_names]
     
     # CI 如果有
-    metric_ci_map = {"mean_delay": "CI_delay", "mean_drift": "CI_drift", "combined_mean": "combined_ci95", "mean_weighted_tardiness": "CI_weighted_tardiness", "mean_resource_utilization": "CI_resource_utilization"}
+    # CI mapping for known metrics
+    metric_ci_map = {
+        "mean_delay": "CI_delay",
+        "mean_drift": "CI_drift",
+        "combined_mean": "combined_ci95",
+        "mean_weighted_tardiness": "CI_weighted_tardiness",
+        "mean_resource_utilization": "CI_resource_utilization"
+    }
     cis = []
     for p in policy_names:
         s = filtered[(dataset, p)]
-        ci_val = 0
-        for ci_key in ci_keys:
-            if ci_key in s and metric.replace("mean_", "") in ci_key.lower():
-                ci_val = s[ci_key]
-                break
+        ci_key = metric_ci_map.get(metric)
+        ci_val = s.get(ci_key, 0) if ci_key else 0
         cis.append(ci_val)
-    
     colors = [get_policy_style(p)["color"] for p in policy_names]
     labels = [get_policy_style(p)["label"] for p in policy_names]
     

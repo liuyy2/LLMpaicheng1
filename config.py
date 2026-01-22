@@ -52,10 +52,11 @@ class Config:
     num_missions_range: Tuple[int, int] = (15, 20)
     ops_per_mission: int = 6
     op_duration_range: Tuple[int, int] = (4, 12)
-    op6_windows_range: Tuple[int, int] = (2, 4)
-    op6_window_length_range: Tuple[int, int] = (4, 12)
-    closure_count_range: Tuple[int, int] = (1, 3)
-    closure_duration_hours_range: Tuple[int, int] = (6, 24)
+    op6_windows_range: Tuple[int, int] = (2, 5)
+    op6_window_length_range: Tuple[int, int] = (2, 6)
+    closure_count_range: Tuple[int, int] = (0, 1)
+    closure_duration_hours_range: Tuple[int, int] = (4, 12)
+    op5_max_wait_hours: int = 24
 
 
 # 默认配置实例
