@@ -556,7 +556,8 @@ def _simulate_episode_v1(
         tasks=scenario.tasks,
         completed_task_ids=state.completed_tasks,
         pad_count=len(scenario.pads),
-        horizon_slots=sim_total
+        horizon_slots=sim_total,
+        slot_minutes=config.slot_minutes
     )
 
     total_runtime = time.time() - start_time
@@ -792,7 +793,8 @@ def _simulate_episode_v2_1(
         missions=state.missions,
         completed_mission_ids=completed_missions,
         resources=state.resources,
-        horizon_slots=sim_total
+        horizon_slots=sim_total,
+        slot_minutes=config.slot_minutes
     )
 
     total_runtime = time.time() - start_time

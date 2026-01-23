@@ -164,6 +164,16 @@ class EpisodeMetricsRecord:
     # 性能（时间单位统一为 ms/s）
     avg_solve_time_ms: float
     total_runtime_s: float
+
+    # ========== 补充指标 ==========
+    avg_time_deviation_min: float
+    total_resource_switches: int
+    makespan_cmax: int
+    feasible_rate: float
+    forced_replan_rate: float
+    avg_frozen: float
+    avg_num_tasks_scheduled: float
+    util_r_pad: float
     
     # ========== LLM 相关指标（新增） ==========
     llm_calls: int = 0                    # LLM 调用次数
@@ -469,7 +479,15 @@ def run_single_episode(
         num_forced_replans=m.num_forced_replans,
         avg_solve_time_ms=m.avg_solve_time_ms,
         total_runtime_s=result.total_runtime_s,
-        # LLM 相关
+        avg_time_deviation_min=m.avg_time_deviation_min,
+        total_resource_switches=m.total_resource_switches,
+        makespan_cmax=m.makespan_cmax,
+        feasible_rate=m.feasible_rate,
+        forced_replan_rate=m.forced_replan_rate,
+        avg_frozen=m.avg_frozen,
+        avg_num_tasks_scheduled=m.avg_num_tasks_scheduled,
+        util_r_pad=m.util_r_pad,
+        # LLM ??
         llm_calls=llm_calls,
         llm_time_total_ms=llm_time_total_ms,
         llm_latency_total_ms=llm_latency_total_ms,
@@ -481,6 +499,7 @@ def run_single_episode(
         solver_time_total_ms=solver_time_total_ms,
         wall_time_total_ms=wall_time_total_ms
     )
+
 
 
 def _write_episode_rolling_log(
@@ -648,7 +667,7 @@ def grid_search_tuning(
 
                 completed += 1
                 if verbose and completed % 10 == 0:
-                    print(f"  ??: {completed}/{len(tasks)}")
+                    print(f"  进度: {completed}/{len(tasks)}")
         else:
             with ThreadPoolExecutor(max_workers=exp_config.max_workers) as executor:
                 futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
@@ -671,7 +690,7 @@ def grid_search_tuning(
 
                     completed += 1
                     if verbose and completed % 10 == 0:
-                        print(f"  ??: {completed}/{len(tasks)}")
+                        print(f"  进度: {completed}/{len(tasks)}")
         avg_delay = sum(delays) / len(delays) if delays else float('inf')
         avg_drift = sum(drifts) / len(drifts) if drifts else float('inf')
         avg_solve = sum(solve_times) / len(solve_times) if solve_times else 0.0
@@ -793,7 +812,7 @@ def run_evaluation(
 
                 completed += 1
                 if verbose and completed % 50 == 0:
-                    print(f"  ??: {completed}/{total}")
+                    print(f"  进度: {completed}/{total}")
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
@@ -815,7 +834,7 @@ def run_evaluation(
 
                     completed += 1
                     if verbose and completed % 50 == 0:
-                        print(f"  ??: {completed}/{total}")
+                        print(f"  进度: {completed}/{total}")
         if verbose:
             print(f"  完成: {total}/{total}")
     
@@ -877,6 +896,14 @@ def _create_failed_record(
         episode_drift=0.0, total_shifts=0, total_switches=0,
         num_replans=0, num_forced_replans=0,
         avg_solve_time_ms=0.0, total_runtime_s=0.0,
+        avg_time_deviation_min=0.0,
+        total_resource_switches=0,
+        makespan_cmax=0,
+        feasible_rate=0.0,
+        forced_replan_rate=0.0,
+        avg_frozen=0.0,
+        avg_num_tasks_scheduled=0.0,
+        util_r_pad=0.0,
         llm_calls=0, llm_time_total_ms=0, llm_latency_total_ms=0,
         llm_prompt_tokens=0, llm_completion_tokens=0, llm_total_tokens=0,
         llm_cache_hit_rate=0.0, llm_fallback_count=0,
@@ -895,13 +922,17 @@ def save_episode_results(records: List[EpisodeMetricsRecord], filepath: str):
     fieldnames = [
         "seed", "disturbance_level", "policy_name", "dataset",
         "completed", "total", "on_time_rate", "avg_delay", "max_delay", "weighted_tardiness", "resource_utilization",
+        "util_r_pad",
         "episode_drift", "total_shifts", "total_switches",
+        "avg_time_deviation_min", "total_resource_switches", "makespan_cmax",
+        "feasible_rate", "forced_replan_rate", "avg_frozen", "avg_num_tasks_scheduled",
         "num_replans", "num_forced_replans", "avg_solve_time_ms", "total_runtime_s",
-        # LLM 相关字段
+        # LLM ????
         "llm_calls", "llm_time_total_ms", "llm_latency_total_ms",
         "llm_prompt_tokens", "llm_completion_tokens", "llm_total_tokens",
         "llm_cache_hit_rate", "llm_fallback_count",
         "solver_time_total_ms", "wall_time_total_ms"
+
     ]
     
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
@@ -974,6 +1005,14 @@ def save_summary(
         shifts = [r.total_shifts for r in recs]
         switches = [r.total_switches for r in recs]
         solve_times = [r.avg_solve_time_ms for r in recs]
+        time_devs = [r.avg_time_deviation_min for r in recs]
+        resource_switches = [r.total_resource_switches for r in recs]
+        makespans = [r.makespan_cmax for r in recs]
+        feasible_rates = [r.feasible_rate for r in recs]
+        forced_replan_rates = [r.forced_replan_rate for r in recs]
+        avg_frozens = [r.avg_frozen for r in recs]
+        avg_tasks_scheduled = [r.avg_num_tasks_scheduled for r in recs]
+        util_r_pads = [r.util_r_pad for r in recs]
         
         combined = [d + tuning_lambda * dr for d, dr in zip(delays, drifts)]
         
@@ -996,6 +1035,18 @@ def save_summary(
             "on_time_rate_mean": round(mean(on_times), 4),
             "total_shifts_mean": round(mean(shifts), 2),
             "total_switches_mean": round(mean(switches), 2),
+            "avg_time_deviation_min_mean": round(mean(time_devs), 2),
+            "avg_time_deviation_min_ci95": round(ci95(time_devs), 2),
+            "total_resource_switches_mean": round(mean(resource_switches), 2),
+            "total_resource_switches_ci95": round(ci95(resource_switches), 2),
+            "makespan_cmax_mean": round(mean(makespans), 2),
+            "makespan_cmax_ci95": round(ci95(makespans), 2),
+            "feasible_rate_mean": round(mean(feasible_rates), 4),
+            "forced_replan_rate_mean": round(mean(forced_replan_rates), 4),
+            "avg_frozen_mean": round(mean(avg_frozens), 2),
+            "avg_num_tasks_scheduled_mean": round(mean(avg_tasks_scheduled), 2),
+            "util_r_pad_mean": round(mean(util_r_pads), 4),
+            "util_r_pad_ci95": round(ci95(util_r_pads), 4),
             "avg_solve_time_ms_mean": round(mean(solve_times), 1),
             # LLM 统计
             "llm_calls_mean": round(mean(llm_calls), 1),
@@ -1384,7 +1435,7 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
         reader = csv.DictReader(f)
         for row in reader:
             # 处理可能缺失的 LLM 字段
-            record = EpisodeMetricsRecord(
+                        record = EpisodeMetricsRecord(
                 seed=int(row['seed']),
                 disturbance_level=row['disturbance_level'],
                 policy_name=row['policy_name'],
@@ -1396,6 +1447,7 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 max_delay=int(row['max_delay']),
                 weighted_tardiness=float(row.get('weighted_tardiness', 0.0)),
                 resource_utilization=float(row.get('resource_utilization', 0.0)),
+                util_r_pad=float(row.get('util_r_pad', 0.0)),
                 episode_drift=float(row['episode_drift']),
                 total_shifts=int(row['total_shifts']),
                 total_switches=int(row['total_switches']),
@@ -1403,7 +1455,14 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 num_forced_replans=int(row['num_forced_replans']),
                 avg_solve_time_ms=float(row['avg_solve_time_ms']),
                 total_runtime_s=float(row['total_runtime_s']),
-                # LLM 相关字段（可能不存在于旧文件）
+                avg_time_deviation_min=float(row.get('avg_time_deviation_min', 0.0)),
+                total_resource_switches=int(float(row.get('total_resource_switches', 0))),
+                makespan_cmax=int(float(row.get('makespan_cmax', 0))),
+                feasible_rate=float(row.get('feasible_rate', 0.0)),
+                forced_replan_rate=float(row.get('forced_replan_rate', 0.0)),
+                avg_frozen=float(row.get('avg_frozen', 0.0)),
+                avg_num_tasks_scheduled=float(row.get('avg_num_tasks_scheduled', 0.0)),
+                # LLM ???????????????
                 llm_calls=int(row.get('llm_calls', 0)),
                 llm_time_total_ms=int(row.get('llm_time_total_ms', 0)),
                 llm_latency_total_ms=int(row.get('llm_latency_total_ms', 0)),
@@ -1416,6 +1475,7 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 wall_time_total_ms=int(row.get('wall_time_total_ms', 0))
             )
             records.append(record)
+
     
     return records
 

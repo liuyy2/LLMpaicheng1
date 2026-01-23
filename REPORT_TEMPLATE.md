@@ -58,7 +58,7 @@
 - 若最优 w_switch > 默认值：说明 pad 切换成本被低估
 ```
 
-#### Greedy 策略
+#### Priority Rule (EDD) 策略
 ```
 预期特征：
 - Delay: ★★★★★ (极低延误，EDF 排序优先紧急任务)
@@ -91,7 +91,7 @@
 |--------|--------------|----------|
 | **light** | Fixed (Default) | 扰动少，默认参数足够 |
 | **medium** | MockLLM / Fixed (Tuned) | LLM 自适应优势最明显 |
-| **heavy** | NoFreeze / Greedy | 需要激进响应，稳定性代价可接受 |
+| **heavy** | NoFreeze / Priority Rule (EDD) | 需要激进响应，稳定性代价可接受 |
 
 ### 1.4 统计显著性解读
 
@@ -181,7 +181,7 @@
 - 策略聚类: 同策略点应聚集，分散说明方差大
 
 示例描述：
-"图 X 展示了各策略在 Delay-Drift 平面上的分布。Greedy 策略
+"图 X 展示了各策略在 Delay-Drift 平面上的分布。Priority Rule (EDD) 策略
 聚集于低 Delay 区域但 Drift 较高；Fixed 策略形成从左下到
 右上的 tradeoff 曲线..."
 ```

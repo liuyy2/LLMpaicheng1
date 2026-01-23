@@ -69,6 +69,16 @@ class EpisodeRecord:
     # 性能
     avg_solve_time_ms: float
     total_runtime_s: float
+
+    # 补充指标
+    avg_time_deviation_min: float = 0.0
+    total_resource_switches: int = 0
+    makespan_cmax: int = 0
+    feasible_rate: float = 0.0
+    forced_replan_rate: float = 0.0
+    avg_frozen: float = 0.0
+    avg_num_tasks_scheduled: float = 0.0
+    util_r_pad: float = 0.0
     
     # LLM 相关字段（可选，旧版 CSV 可能不包含）
     llm_calls: int = 0
@@ -113,6 +123,14 @@ def load_episode_results(filepath: str) -> List[EpisodeRecord]:
                 num_forced_replans=int(row['num_forced_replans']),
                 avg_solve_time_ms=float(row['avg_solve_time_ms']),
                 total_runtime_s=float(row['total_runtime_s']),
+                avg_time_deviation_min=float(row.get('avg_time_deviation_min', 0.0)),
+                total_resource_switches=int(float(row.get('total_resource_switches', 0))),
+                makespan_cmax=int(float(row.get('makespan_cmax', 0))),
+                feasible_rate=float(row.get('feasible_rate', 0.0)),
+                forced_replan_rate=float(row.get('forced_replan_rate', 0.0)),
+                avg_frozen=float(row.get('avg_frozen', 0.0)),
+                avg_num_tasks_scheduled=float(row.get('avg_num_tasks_scheduled', 0.0)),
+                util_r_pad=float(row.get('util_r_pad', 0.0)),
                 # LLM 字段（兼容旧版 CSV）
                 llm_calls=int(row.get('llm_calls', 0)),
                 llm_time_total_ms=int(row.get('llm_time_total_ms', 0)),
@@ -243,6 +261,14 @@ def compute_summary_stats(
         shifts = [r.total_shifts for r in recs]
         switches = [r.total_switches for r in recs]
         replans = [r.num_replans for r in recs]
+        time_devs = [r.avg_time_deviation_min for r in recs]
+        resource_switches = [r.total_resource_switches for r in recs]
+        makespans = [r.makespan_cmax for r in recs]
+        feasible_rates = [r.feasible_rate for r in recs]
+        forced_replan_rates = [r.forced_replan_rate for r in recs]
+        avg_frozens = [r.avg_frozen for r in recs]
+        avg_tasks_scheduled = [r.avg_num_tasks_scheduled for r in recs]
+        util_r_pads = [r.util_r_pad for r in recs]
         
         # 时间指标
         solve_times = [r.avg_solve_time_ms for r in recs]
@@ -291,6 +317,18 @@ def compute_summary_stats(
             "mean_replans": mean(replans),
             "mean_switch": mean(switches),
             "mean_shifts": mean(shifts),
+            "mean_avg_time_deviation_min": mean(time_devs),
+            "CI_avg_time_deviation_min": ci95(time_devs),
+            "mean_total_resource_switches": mean(resource_switches),
+            "CI_total_resource_switches": ci95(resource_switches),
+            "mean_makespan_cmax": mean(makespans),
+            "CI_makespan_cmax": ci95(makespans),
+            "mean_feasible_rate": mean(feasible_rates),
+            "mean_forced_replan_rate": mean(forced_replan_rates),
+            "mean_avg_frozen": mean(avg_frozens),
+            "mean_avg_tasks_scheduled": mean(avg_tasks_scheduled),
+            "mean_util_r_pad": mean(util_r_pads),
+            "CI_util_r_pad": ci95(util_r_pads),
             
             # 时间
             "mean_solver_time_ms": mean(solve_times),
@@ -318,7 +356,7 @@ POLICY_STYLES = {
     "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Fixed (Tuned)"},
     "fixed_default": {"color": "#3498db", "marker": "s", "label": "Fixed (Default)"},
     "nofreeze": {"color": "#e74c3c", "marker": "^", "label": "NoFreeze"},
-    "greedy": {"color": "#9b59b6", "marker": "D", "label": "Greedy"},
+    "greedy": {"color": "#9b59b6", "marker": "D", "label": "Priority Rule (EDD)"},
     "mockllm": {"color": "#f39c12", "marker": "v", "label": "MockLLM"},
     "llm_real": {"color": "#1abc9c", "marker": "P", "label": "LLM (Real)"},
     "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"}
@@ -592,7 +630,11 @@ def plot_policy_comparison_bars(
         "mean_drift": "CI_drift",
         "combined_mean": "combined_ci95",
         "mean_weighted_tardiness": "CI_weighted_tardiness",
-        "mean_resource_utilization": "CI_resource_utilization"
+        "mean_resource_utilization": "CI_resource_utilization",
+        "mean_avg_time_deviation_min": "CI_avg_time_deviation_min",
+        "mean_total_resource_switches": "CI_total_resource_switches",
+        "mean_makespan_cmax": "CI_makespan_cmax",
+        "mean_util_r_pad": "CI_util_r_pad"
     }
     cis = []
     for p in policy_names:
@@ -912,6 +954,12 @@ def save_summary_csv(
         "mean_weighted_tardiness", "CI_weighted_tardiness",
         "mean_resource_utilization", "CI_resource_utilization",
         "mean_replans", "mean_switch", "mean_shifts",
+        "mean_avg_time_deviation_min", "CI_avg_time_deviation_min",
+        "mean_total_resource_switches", "CI_total_resource_switches",
+        "mean_makespan_cmax", "CI_makespan_cmax",
+        "mean_feasible_rate", "mean_forced_replan_rate",
+        "mean_avg_frozen", "mean_avg_tasks_scheduled",
+        "mean_util_r_pad", "CI_util_r_pad",
         "mean_solver_time_ms", "mean_wall_time_ms",
         "fallback_rate", "cache_hit_rate",
         "mean_llm_time_ms", "mean_llm_total_tokens",
@@ -935,6 +983,18 @@ def save_summary_csv(
             "mean_replans": round(s["mean_replans"], 2),
             "mean_switch": round(s["mean_switch"], 2),
             "mean_shifts": round(s["mean_shifts"], 2),
+            "mean_avg_time_deviation_min": round(s["mean_avg_time_deviation_min"], 2),
+            "CI_avg_time_deviation_min": round(s["CI_avg_time_deviation_min"], 2),
+            "mean_total_resource_switches": round(s["mean_total_resource_switches"], 2),
+            "CI_total_resource_switches": round(s["CI_total_resource_switches"], 2),
+            "mean_makespan_cmax": round(s["mean_makespan_cmax"], 2),
+            "CI_makespan_cmax": round(s["CI_makespan_cmax"], 2),
+            "mean_feasible_rate": round(s["mean_feasible_rate"], 4),
+            "mean_forced_replan_rate": round(s["mean_forced_replan_rate"], 4),
+            "mean_avg_frozen": round(s["mean_avg_frozen"], 2),
+            "mean_avg_tasks_scheduled": round(s["mean_avg_tasks_scheduled"], 2),
+            "mean_util_r_pad": round(s["mean_util_r_pad"], 4),
+            "CI_util_r_pad": round(s["CI_util_r_pad"], 4),
             "mean_solver_time_ms": round(s["mean_solver_time_ms"], 1),
             "mean_wall_time_ms": round(s["mean_wall_time_ms"], 1),
             "fallback_rate": round(s["fallback_rate"], 4),
@@ -1005,6 +1065,12 @@ def save_enhanced_summary_with_tests(
         "mean_weighted_tardiness", "CI_weighted_tardiness",
         "mean_resource_utilization", "CI_resource_utilization",
         "mean_replans", "mean_switch",
+        "mean_avg_time_deviation_min", "CI_avg_time_deviation_min",
+        "mean_total_resource_switches", "CI_total_resource_switches",
+        "mean_makespan_cmax", "CI_makespan_cmax",
+        "mean_feasible_rate", "mean_forced_replan_rate",
+        "mean_avg_frozen", "mean_avg_tasks_scheduled",
+        "mean_util_r_pad", "CI_util_r_pad",
         "mean_solver_time_ms", "mean_wall_time_ms",
         "fallback_rate", "cache_hit_rate",
         "mean_llm_time_ms", "mean_llm_total_tokens",
@@ -1027,6 +1093,18 @@ def save_enhanced_summary_with_tests(
             "on_time_mean": round(s["on_time_mean"], 4),
             "mean_replans": round(s["mean_replans"], 2),
             "mean_switch": round(s["mean_switch"], 2),
+            "mean_avg_time_deviation_min": round(s["mean_avg_time_deviation_min"], 2),
+            "CI_avg_time_deviation_min": round(s["CI_avg_time_deviation_min"], 2),
+            "mean_total_resource_switches": round(s["mean_total_resource_switches"], 2),
+            "CI_total_resource_switches": round(s["CI_total_resource_switches"], 2),
+            "mean_makespan_cmax": round(s["mean_makespan_cmax"], 2),
+            "CI_makespan_cmax": round(s["CI_makespan_cmax"], 2),
+            "mean_feasible_rate": round(s["mean_feasible_rate"], 4),
+            "mean_forced_replan_rate": round(s["mean_forced_replan_rate"], 4),
+            "mean_avg_frozen": round(s["mean_avg_frozen"], 2),
+            "mean_avg_tasks_scheduled": round(s["mean_avg_tasks_scheduled"], 2),
+            "mean_util_r_pad": round(s["mean_util_r_pad"], 4),
+            "CI_util_r_pad": round(s["CI_util_r_pad"], 4),
             "mean_solver_time_ms": round(s["mean_solver_time_ms"], 1),
             "mean_wall_time_ms": round(s["mean_wall_time_ms"], 1),
             "fallback_rate": round(s["fallback_rate"], 4),
@@ -1384,6 +1462,38 @@ def run_analysis(
         metric="mean_resource_utilization",
         ylabel="Resource Utilization"
     )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_util_r_pad.png"),
+        dataset=primary_dataset,
+        metric="mean_util_r_pad",
+        ylabel="Utilization (R_pad)"
+    )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_makespan_cmax.png"),
+        dataset=primary_dataset,
+        metric="mean_makespan_cmax",
+        ylabel="Makespan Cmax (slots)"
+    )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_avg_time_deviation_min.png"),
+        dataset=primary_dataset,
+        metric="mean_avg_time_deviation_min",
+        ylabel="Avg Time Deviation (min)"
+    )
+
+    plot_policy_comparison_bars(
+        stats,
+        os.path.join(output_dir, "policy_comparison_total_resource_switches.png"),
+        dataset=primary_dataset,
+        metric="mean_total_resource_switches",
+        ylabel="Total Resource Switches"
+    )
     
     plot_metric_by_disturbance(
         records,
@@ -1428,6 +1538,10 @@ def run_analysis(
     print(f"  - {output_dir}/replans_switches_boxplot.png")
     print(f"  - {output_dir}/llm_vs_solver_time.png")
     print(f"  - {output_dir}/policy_comparison_*.png")
+    print(f"  - {output_dir}/policy_comparison_util_r_pad.png")
+    print(f"  - {output_dir}/policy_comparison_makespan_cmax.png")
+    print(f"  - {output_dir}/policy_comparison_avg_time_deviation_min.png")
+    print(f"  - {output_dir}/policy_comparison_total_resource_switches.png")
     print(f"  - {output_dir}/delay_by_disturbance.png")
     print(f"  - {output_dir}/drift_by_disturbance.png")
     if tuning_results:

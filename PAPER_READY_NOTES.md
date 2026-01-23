@@ -22,7 +22,7 @@
 | Policy | Avg Delay ↓ | Plan Drift ↓ | Solver Time (ms) | LLM Time (ms) | Wall Time (ms) |
 |--------|-------------|--------------|------------------|---------------|----------------|
 | Fixed (Tuned) | 0.12 ± 0.05 | 0.005 ± 0.002 | 625 ± 42 | - | 625 ± 42 |
-| Greedy | 0.08 ± 0.03 | 0.012 ± 0.003 | 0 | - | 15 ± 3 |
+| Priority Rule (EDD) | 0.08 ± 0.03 | 0.012 ± 0.003 | 0 | - | 15 ± 3 |
 | NoFreeze | 0.15 ± 0.06 | 0.008 ± 0.002 | 618 ± 38 | - | 618 ± 38 |
 | **LLM-Guided** | **0.06 ± 0.02** | **0.004 ± 0.001** | 612 ± 35 | 3200 ± 580 | 3812 ± 590 |
 
@@ -245,7 +245,7 @@ supplementary/
 
 ### Baselines
 - Fixed: Tuned on training set (freeze=3, w_delay=10, w_shift=1, w_switch=5)
-- Greedy: Earliest-deadline-first heuristic
+- Priority Rule (EDD): Earliest-deadline-first heuristic
 - NoFreeze: CP-SAT without freeze horizon
 
 ### Evaluation Metrics
@@ -260,7 +260,7 @@ supplementary/
 | Policy | Delay ↓ | Drift ↓ | Combined ↓ | Solver (ms) | LLM (ms) | Fallback % |
 |--------|---------|---------|------------|-------------|----------|------------|
 | Fixed  | 0.12±0.05 | 0.005±0.002 | 0.15±0.06 | 625±42 | - | - |
-| Greedy | 0.08±0.03 | 0.012±0.003 | 0.14±0.04 | 0 | - | - |
+| Priority Rule (EDD) | 0.08±0.03 | 0.012±0.003 | 0.14±0.04 | 0 | - | - |
 | NoFreeze | 0.15±0.06 | 0.008±0.002 | 0.19±0.07 | 618±38 | - | - |
 | **LLM** | **0.06±0.02** | **0.004±0.001** | **0.08±0.03** | 612±35 | 3200±580 | 2.3% |
 ```

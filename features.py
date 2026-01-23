@@ -255,7 +255,24 @@ def compute_pad_outage_overlap_ops(
     current_plan: Optional[PlanV2_1],
     slot_minutes: int = 10
 ) -> Tuple[float, int]:
-    total_outage_slots = 0
+    pad = next((r for r in resources if r.resource_id == "R_pad"), None)
+    if not pad:
+        return 0.0, 0
+
+    total_outage_slots = _compute_unavailable_slots(pad.unavailable, now, horizon_end)
+    outage_hours = (total_outage_slots * slot_minutes) / 60.0
+
+    affected_ops = 0
+    if current_plan:
+        for assignment in current_plan.op_assignments:
+            if "R_pad" not in assignment.resources:
+                continue
+            for ua_start, ua_end in pad.unavailable:
+                if not (assignment.end_slot <= ua_start or assignment.start_slot > ua_end):
+                    affected_ops += 1
+                    break
+
+    return outage_hours, affected_ops
 
 def _compute_unavailable_slots(intervals, start, end):
     total = 0
