@@ -54,35 +54,36 @@ def create_fake_features(scenario: str = "normal") -> StateFeatures:
     """
     base = {
         "window_loss_pct": 0.1,
-        "window_remaining_pct": 0.8,
         "pad_outage_overlap_hours": 0.0,
-        "pad_outage_task_count": 0,
         "delay_increase_minutes": 10,
-        "current_total_delay_minutes": 20,
-        "num_tasks_in_horizon": 8,
+        "pad_pressure": 0.8,
+        "slack_min_minutes": 120,
+        "resource_conflict_pressure": 0.2,
+        "trend_window_loss": 0.0,
+        "trend_pad_pressure": 0.0,
+        "trend_slack_min_minutes": 0.0,
+        "trend_delay_increase_minutes": 0.0,
+        "volatility_pad_pressure": 0.05,
         "num_urgent_tasks": 1,
-        "completed_rate": 0.3,
-        "recent_shift_count": 1,
-        "recent_switch_count": 0
     }
     
     if scenario == "high_loss":
         base.update({
             "window_loss_pct": 0.5,
-            "window_remaining_pct": 0.4,
-            "delay_increase_minutes": 60
+            "delay_increase_minutes": 60,
+            "trend_window_loss": 0.08
         })
     elif scenario == "many_urgent":
         base.update({
             "num_urgent_tasks": 6,
-            "delay_increase_minutes": 90
+            "delay_increase_minutes": 90,
+            "trend_slack_min_minutes": -15
         })
     elif scenario == "pad_outage":
         base.update({
             "pad_outage_overlap_hours": 3.0,
-            "pad_outage_task_count": 4,
-            "recent_shift_count": 5,
-            "recent_switch_count": 3
+            "volatility_pad_pressure": 0.2,
+            "trend_pad_pressure": 0.1
         })
     
     return StateFeatures(**base)

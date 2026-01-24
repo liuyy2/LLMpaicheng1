@@ -396,7 +396,7 @@ def _simulate_episode_v1(
     snapshots: List[RollingSnapshot] = []
     rolling_metrics_list: List[RollingMetrics] = []
     prev_window_slots = None
-    prev_window_slots = None
+    feature_history = []
 
     executed_assignments: Dict[str, TaskAssignment] = {}
 
@@ -512,9 +512,11 @@ def _simulate_episode_v1(
                 completed_tasks=state.completed_tasks,
                 prev_window_slots=prev_window_slots,
                 recent_shifts=rolling_m.num_shifts,
-                recent_switches=rolling_m.num_switches
+                recent_switches=rolling_m.num_switches,
+                history=feature_history
             )
             state_features = features.to_dict()
+            feature_history.append(features)
         except Exception:
             state_features = None
 
@@ -604,6 +606,7 @@ def _simulate_episode_v2_1(
 
     snapshots: List[RollingSnapshot] = []
     rolling_metrics_list: List[RollingMetrics] = []
+    feature_history = []
 
     executed_assignments: Dict[str, OpAssignment] = {}
 
@@ -739,9 +742,11 @@ def _simulate_episode_v2_1(
                 completed_ops=state.completed_ops,
                 prev_window_slots=prev_window_slots,
                 recent_shifts=rolling_m.num_shifts,
-                recent_switches=rolling_m.num_switches
+                recent_switches=rolling_m.num_switches,
+                history=feature_history
             )
             state_features = features.to_dict()
+            feature_history.append(features)
         except Exception:
             state_features = None
 
@@ -862,7 +867,7 @@ def save_episode_logs(
     metrics_csv_path = os.path.join(output_dir, "metrics_per_roll.csv")
     with open(metrics_csv_path, 'w', newline='', encoding='utf-8') as f:
         fieldnames = [
-            "t", "plan_drift", "num_shifts", "num_switches",
+            "t", "plan_drift", "avg_time_shift_slots", "num_shifts", "num_switches",
             "num_tasks_scheduled", "num_frozen", "solve_time_ms",
             "is_feasible", "forced_replan"
         ]

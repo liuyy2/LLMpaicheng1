@@ -11,10 +11,10 @@ class Config:
     """全局配置"""
     schema_version: str = "v2_1"             # "v1" | "v2_1"
     # 时间离散化
-    slot_minutes: int = 10
-    rolling_interval: int = 6                 # slots (60min)
-    horizon_slots: int = 144                  # 24h
-    sim_total_slots: int = 720                # 120h
+    slot_minutes: int = 15                   # 15分钟/格 (比10分钟更整洁，比30分钟更精确)
+    rolling_interval: int = 12                # 12 * 15m = 180m = 3小时 (符合"半个班次"的决策频率)
+    horizon_slots: int = 96                  # 96 * 15m = 1440m = 24小时 (经典的 Rolling Horizon 长度)
+    sim_total_slots: int = 480                # 480 * 15m = 120小时 = 5天
     
     # 冻结
     freeze_horizon: int = 12                  # 2h = 12 slots

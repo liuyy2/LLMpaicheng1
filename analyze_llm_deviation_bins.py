@@ -228,20 +228,7 @@ def _default_feature_specs() -> List[Tuple[str, Callable[[Any], str]]]:
     """
     return [
         ("window_loss_pct", lambda v: _bin_numeric(_safe_float(v), [0.0, 0.05, 0.2, 0.5, 1.0])),
-        ("window_remaining_pct", lambda v: _bin_numeric(_safe_float(v), [0.0, 0.2, 0.5, 0.8, 1.0])),
         ("pad_outage_overlap_hours", lambda v: _bin_numeric(_safe_float(v), [0.0, 0.1, 0.5, 1.0, 2.0])),
-        (
-            "pad_outage_task_count",
-            lambda v: _bin_discrete(
-                _safe_int(v),
-                [
-                    (lambda x: x == 0, "0"),
-                    (lambda x: x == 1, "1"),
-                    (lambda x: x == 2, "2"),
-                    (lambda x: x >= 3, ">=3"),
-                ],
-            ),
-        ),
         (
             "delay_increase_minutes",
             lambda v: _bin_discrete(
@@ -267,29 +254,11 @@ def _default_feature_specs() -> List[Tuple[str, Callable[[Any], str]]]:
                 ],
             ),
         ),
-        (
-            "recent_shift_count",
-            lambda v: _bin_discrete(
-                _safe_int(v),
-                [
-                    (lambda x: x == 0, "0"),
-                    (lambda x: 1 <= x <= 2, "1-2"),
-                    (lambda x: 3 <= x <= 5, "3-5"),
-                    (lambda x: x >= 6, ">=6"),
-                ],
-            ),
-        ),
-        (
-            "recent_switch_count",
-            lambda v: _bin_discrete(
-                _safe_int(v),
-                [
-                    (lambda x: x == 0, "0"),
-                    (lambda x: 1 <= x <= 2, "1-2"),
-                    (lambda x: x >= 3, ">=3"),
-                ],
-            ),
-        ),
+        ("trend_window_loss", lambda v: _bin_numeric(_safe_float(v), [-0.1, -0.02, 0.0, 0.05, 0.1, 0.2])),
+        ("trend_pad_pressure", lambda v: _bin_numeric(_safe_float(v), [-0.1, -0.02, 0.0, 0.05, 0.1, 0.2])),
+        ("trend_slack_min_minutes", lambda v: _bin_numeric(_safe_float(v), [-60, -20, -5, 0, 5, 20])),
+        ("trend_delay_increase_minutes", lambda v: _bin_numeric(_safe_float(v), [-30, -5, 0, 5, 20, 50])),
+        ("volatility_pad_pressure", lambda v: _bin_numeric(_safe_float(v), [0.0, 0.05, 0.1, 0.2, 0.4])),
     ]
 
 

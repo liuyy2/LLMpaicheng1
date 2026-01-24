@@ -1435,7 +1435,7 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
         reader = csv.DictReader(f)
         for row in reader:
             # 处理可能缺失的 LLM 字段
-                        record = EpisodeMetricsRecord(
+            record = EpisodeMetricsRecord(
                 seed=int(row['seed']),
                 disturbance_level=row['disturbance_level'],
                 policy_name=row['policy_name'],

@@ -10,57 +10,75 @@
 from typing import Dict, Any, List, Optional, Tuple, Set
 from dataclasses import dataclass
 import copy
+import statistics
 
 from solver_cpsat import Task, Pad, Plan, TaskAssignment, Mission, Resource, PlanV2_1, OpAssignment
 from config import Config, DEFAULT_CONFIG
-
 
 @dataclass
 class StateFeatures:
     """状态特征（作为 LLM/MockLLM 输入）"""
     # 窗口损失
     window_loss_pct: float                    # [0, 1] 窗口减少比例
-    window_remaining_pct: float               # [0, 1] 剩余窗口比例
     
     # Pad 可用性
     pad_outage_overlap_hours: float           # 未来 H 内 outage 总时长（小时）
-    pad_outage_task_count: int                # 受 outage 影响的任务数
     
     # 延迟估算
     delay_increase_minutes: float             # 预估延误增加（分钟）
-    current_total_delay_minutes: float        # 当前总延迟（分钟）
     pad_pressure: float                       # R_pad pressure (demand / capacity)
     slack_min_minutes: float                  # min slack in minutes
     resource_conflict_pressure: float         # R3/R4 conflict pressure
+    trend_window_loss: float                  # long-range trend of window loss
+    trend_pad_pressure: float                 # long-range trend of pad pressure
+    trend_slack_min_minutes: float            # long-range trend of min slack
+    trend_delay_increase_minutes: float       # long-range trend of delay increase
+    volatility_pad_pressure: float            # volatility of pad pressure
     
     # 任务状态
-    num_tasks_in_horizon: int                 # 视野内任务数
     num_urgent_tasks: int                     # 紧急任务数（即将到期）
-    completed_rate: float                     # 已完成比例
     
     # 稳定性状态
-    recent_shift_count: int                   # 最近一次重排的时间变化数
-    recent_switch_count: int                  # 最近一次重排的 pad 切换数
     
     def to_dict(self) -> Dict[str, Any]:
         """转为字典（便于 JSON 序列化）"""
         return {
             "window_loss_pct": round(self.window_loss_pct, 4),
-            "window_remaining_pct": round(self.window_remaining_pct, 4),
             "pad_outage_overlap_hours": round(self.pad_outage_overlap_hours, 2),
-            "pad_outage_task_count": self.pad_outage_task_count,
             "delay_increase_minutes": round(self.delay_increase_minutes, 1),
-            "current_total_delay_minutes": round(self.current_total_delay_minutes, 1),
             "pad_pressure": round(self.pad_pressure, 4),
             "slack_min_minutes": round(self.slack_min_minutes, 1),
             "resource_conflict_pressure": round(self.resource_conflict_pressure, 4),
-            "num_tasks_in_horizon": self.num_tasks_in_horizon,
+            "trend_window_loss": round(self.trend_window_loss, 4),
+            "trend_pad_pressure": round(self.trend_pad_pressure, 4),
+            "trend_slack_min_minutes": round(self.trend_slack_min_minutes, 2),
+            "trend_delay_increase_minutes": round(self.trend_delay_increase_minutes, 2),
+            "volatility_pad_pressure": round(self.volatility_pad_pressure, 4),
             "num_urgent_tasks": self.num_urgent_tasks,
-            "completed_rate": round(self.completed_rate, 4),
-            "recent_shift_count": self.recent_shift_count,
-            "recent_switch_count": self.recent_switch_count
         }
 
+TREND_WINDOW = 4
+
+def _series_with_current(history, attr, current):
+    values = [getattr(h, attr) for h in history] if history else []
+    values.append(current)
+    return values
+
+def _compute_trend(values, window: int = TREND_WINDOW):
+    if len(values) < 2:
+        return 0.0
+    k = min(window, len(values))
+    denom = max(1, k - 1)
+    return (values[-1] - values[-k]) / denom
+
+def _compute_volatility(values, window: int = TREND_WINDOW):
+    if len(values) < 2:
+        return 0.0
+    k = min(window, len(values))
+    subset = values[-k:]
+    if len(subset) < 2:
+        return 0.0
+    return statistics.pstdev(subset)
 
 def compute_window_loss_pct(
     tasks: List[Task],
@@ -136,7 +154,6 @@ def compute_window_loss_pct(
     
     return window_loss_pct, window_remaining_pct, current_window_slots
 
-
 def compute_window_loss_pct_ops(
     missions: List[Mission],
     now: int,
@@ -193,7 +210,6 @@ def compute_window_loss_pct_ops(
 
     return window_loss_pct, window_remaining_pct, current_window_slots
 
-
 def compute_pad_outage_overlap(
     pads: List[Pad],
     now: int,
@@ -247,7 +263,6 @@ def compute_pad_outage_overlap(
     
     return outage_hours, affected_tasks
 
-
 def compute_pad_outage_overlap_ops(
     resources: List[Resource],
     now: int,
@@ -282,7 +297,6 @@ def _compute_unavailable_slots(intervals, start, end):
         total += min(e, end) - max(s, start) + 1
     return total
 
-
 def compute_pad_pressure_tasks(tasks, pads, now, horizon_end, completed_tasks):
     total_demand = sum(
         t.duration for t in tasks
@@ -294,7 +308,6 @@ def compute_pad_pressure_tasks(tasks, pads, now, horizon_end, completed_tasks):
     )
     available = max(1, total_capacity - total_unavail)
     return total_demand / available
-
 
 def compute_pad_pressure_ops(missions, resources, now, horizon_end, completed_ops):
     pad = next((r for r in resources if r.resource_id == 'R_pad'), None)
@@ -313,7 +326,6 @@ def compute_pad_pressure_ops(missions, resources, now, horizon_end, completed_op
     total_unavail = _compute_unavailable_slots(pad.unavailable, now, horizon_end)
     available = max(1, total_capacity - total_unavail)
     return total_demand / available
-
 
 def compute_resource_conflict_pressure_ops(missions, resources, now, horizon_end, completed_ops):
     pressures = []
@@ -336,7 +348,6 @@ def compute_resource_conflict_pressure_ops(missions, resources, now, horizon_end
         pressures.append(demand / available)
     return max(pressures) if pressures else 0.0
 
-
 def compute_min_slack_minutes_tasks(tasks, now, completed_tasks, slot_minutes):
     slacks = []
     for task in tasks:
@@ -345,7 +356,6 @@ def compute_min_slack_minutes_tasks(tasks, now, completed_tasks, slot_minutes):
         slack_slots = task.due - (now + task.duration)
         slacks.append(slack_slots * slot_minutes)
     return min(slacks) if slacks else 0.0
-
 
 def compute_min_slack_minutes_ops(missions, now, completed_ops, slot_minutes):
     slacks = []
@@ -381,7 +391,6 @@ def compute_min_slack_minutes_ops(missions, now, completed_ops, slot_minutes):
                     break
 
     return outage_hours, affected_ops
-
 
 def compute_delay_increase(
     tasks: List[Task],
@@ -458,7 +467,6 @@ def compute_delay_increase(
     
     return delay_increase_minutes, current_total_delay_minutes
 
-
 def compute_delay_increase_ops(
     missions: List[Mission],
     current_plan: Optional[PlanV2_1],
@@ -514,7 +522,6 @@ def compute_delay_increase_ops(
 
     return delay_increase_minutes, current_total_delay_minutes
 
-
 def count_urgent_tasks(
     tasks: List[Task],
     now: int,
@@ -547,7 +554,6 @@ def count_urgent_tasks(
     
     return count
 
-
 def count_urgent_missions(
     missions: List[Mission],
     now: int,
@@ -566,7 +572,6 @@ def count_urgent_missions(
 
     return count
 
-
 def compute_state_features(
     tasks: List[Task],
     pads: List[Pad],
@@ -576,7 +581,8 @@ def compute_state_features(
     completed_tasks: Optional[Set[str]] = None,
     prev_window_slots: Optional[Dict[str, Set[int]]] = None,
     recent_shifts: int = 0,
-    recent_switches: int = 0
+    recent_switches: int = 0,
+    history: Optional[List["StateFeatures"]] = None
 ) -> Tuple[StateFeatures, Dict[str, Set[int]]]:
     """
     计算完整的状态特征
@@ -601,17 +607,17 @@ def compute_state_features(
     horizon_end = now + config.horizon_slots
     
     # 窗口损失
-    window_loss_pct, window_remaining_pct, curr_window_slots = compute_window_loss_pct(
+    window_loss_pct, _window_remaining_pct, curr_window_slots = compute_window_loss_pct(
         tasks, now, horizon_end, prev_window_slots, completed_tasks
     )
     
     # Pad outage
-    outage_hours, outage_task_count = compute_pad_outage_overlap(
+    outage_hours, _outage_task_count = compute_pad_outage_overlap(
         pads, now, horizon_end, tasks, current_plan, config.slot_minutes
     )
     
     # 延迟估算
-    delay_increase, current_delay = compute_delay_increase(
+    delay_increase, _current_delay = compute_delay_increase(
         tasks, current_plan, now, config.slot_minutes, completed_tasks
     )
     
@@ -624,38 +630,39 @@ def compute_state_features(
     )
 
     resource_conflict_pressure = 0.0
-    # 视野内任务数
-    tasks_in_horizon = [
-        t for t in tasks 
-        if t.task_id not in completed_tasks and t.release <= horizon_end
-    ]
     
     # 紧急任务
     urgent_count = count_urgent_tasks(tasks, now, completed_tasks=completed_tasks)
     
     # 完成率
-    total = len(tasks)
-    completed_rate = len(completed_tasks) / total if total > 0 else 0.0
-    
+
+    window_loss_series = _series_with_current(history, "window_loss_pct", window_loss_pct)
+    pad_pressure_series = _series_with_current(history, "pad_pressure", pad_pressure)
+    slack_min_series = _series_with_current(history, "slack_min_minutes", slack_min)
+    delay_increase_series = _series_with_current(history, "delay_increase_minutes", delay_increase)
+
+    trend_window_loss = _compute_trend(window_loss_series)
+    trend_pad_pressure = _compute_trend(pad_pressure_series)
+    trend_slack_min = _compute_trend(slack_min_series)
+    trend_delay_increase = _compute_trend(delay_increase_series)
+    volatility_pad_pressure = _compute_volatility(pad_pressure_series)
+
     features = StateFeatures(
         window_loss_pct=window_loss_pct,
-        window_remaining_pct=window_remaining_pct,
         pad_outage_overlap_hours=outage_hours,
-        pad_outage_task_count=outage_task_count,
         delay_increase_minutes=delay_increase,
-        current_total_delay_minutes=current_delay,
         pad_pressure=pad_pressure,
         slack_min_minutes=slack_min,
         resource_conflict_pressure=resource_conflict_pressure,
-        num_tasks_in_horizon=len(tasks_in_horizon),
+        trend_window_loss=trend_window_loss,
+        trend_pad_pressure=trend_pad_pressure,
+        trend_slack_min_minutes=trend_slack_min,
+        trend_delay_increase_minutes=trend_delay_increase,
+        volatility_pad_pressure=volatility_pad_pressure,
         num_urgent_tasks=urgent_count,
-        completed_rate=completed_rate,
-        recent_shift_count=recent_shifts,
-        recent_switch_count=recent_switches
     )
     
     return features, curr_window_slots
-
 
 def compute_state_features_ops(
     missions: List[Mission],
@@ -666,7 +673,8 @@ def compute_state_features_ops(
     completed_ops: Optional[Set[str]] = None,
     prev_window_slots: Optional[Dict[str, Set[int]]] = None,
     recent_shifts: int = 0,
-    recent_switches: int = 0
+    recent_switches: int = 0,
+    history: Optional[List["StateFeatures"]] = None
 ) -> Tuple[StateFeatures, Dict[str, Set[int]]]:
     if completed_ops is None:
         completed_ops = set()
@@ -679,15 +687,15 @@ def compute_state_features_ops(
 
     horizon_end = now + config.horizon_slots
 
-    window_loss_pct, window_remaining_pct, curr_window_slots = compute_window_loss_pct_ops(
+    window_loss_pct, _window_remaining_pct, curr_window_slots = compute_window_loss_pct_ops(
         missions, now, horizon_end, prev_window_slots, completed_missions
     )
 
-    outage_hours, outage_task_count = compute_pad_outage_overlap_ops(
+    outage_hours, _outage_task_count = compute_pad_outage_overlap_ops(
         resources, now, horizon_end, current_plan, config.slot_minutes
     )
 
-    delay_increase, current_delay = compute_delay_increase_ops(
+    delay_increase, _current_delay = compute_delay_increase_ops(
         missions, current_plan, now, config.slot_minutes, completed_ops
     )
 
@@ -702,37 +710,39 @@ def compute_state_features_ops(
     resource_conflict_pressure = compute_resource_conflict_pressure_ops(
         missions, resources, now, horizon_end, completed_ops
     )
-    missions_in_horizon = [
-        m for m in missions
-        if m.mission_id not in completed_missions and m.release <= horizon_end
-    ]
 
     urgent_count = count_urgent_missions(
         missions, now, completed_missions=completed_missions
     )
 
-    total = len(missions)
-    completed_rate = len(completed_missions) / total if total > 0 else 0.0
+
+    window_loss_series = _series_with_current(history, "window_loss_pct", window_loss_pct)
+    pad_pressure_series = _series_with_current(history, "pad_pressure", pad_pressure)
+    slack_min_series = _series_with_current(history, "slack_min_minutes", slack_min)
+    delay_increase_series = _series_with_current(history, "delay_increase_minutes", delay_increase)
+
+    trend_window_loss = _compute_trend(window_loss_series)
+    trend_pad_pressure = _compute_trend(pad_pressure_series)
+    trend_slack_min = _compute_trend(slack_min_series)
+    trend_delay_increase = _compute_trend(delay_increase_series)
+    volatility_pad_pressure = _compute_volatility(pad_pressure_series)
 
     features = StateFeatures(
         window_loss_pct=window_loss_pct,
-        window_remaining_pct=window_remaining_pct,
         pad_outage_overlap_hours=outage_hours,
-        pad_outage_task_count=outage_task_count,
         delay_increase_minutes=delay_increase,
-        current_total_delay_minutes=current_delay,
         pad_pressure=pad_pressure,
         slack_min_minutes=slack_min,
         resource_conflict_pressure=resource_conflict_pressure,
-        num_tasks_in_horizon=len(missions_in_horizon),
+        trend_window_loss=trend_window_loss,
+        trend_pad_pressure=trend_pad_pressure,
+        trend_slack_min_minutes=trend_slack_min,
+        trend_delay_increase_minutes=trend_delay_increase,
+        volatility_pad_pressure=volatility_pad_pressure,
         num_urgent_tasks=urgent_count,
-        completed_rate=completed_rate,
-        recent_shift_count=recent_shifts,
-        recent_switch_count=recent_switches
     )
 
     return features, curr_window_slots
-
 
 # ============================================================================
 # 模块测试
