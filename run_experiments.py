@@ -980,8 +980,7 @@ def save_summary(
         if key not in groups:
             groups[key] = []
         groups[key].append(record)
-    
-    # 计算统计
+
     def mean(values):
         return sum(values) / len(values) if values else 0.0
     
@@ -997,6 +996,28 @@ def save_summary(
             return 0.0
         return 1.96 * std(values) / math.sqrt(len(values))
     
+    # ?????????????????
+    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
+    baseline_means: Dict[str, Tuple[float, float]] = {}
+    datasets = sorted({k[0] for k in groups.keys()})
+    for dataset in datasets:
+        baseline_recs = None
+        for name in baseline_priority:
+            baseline_recs = groups.get((dataset, name))
+            if baseline_recs:
+                break
+        if not baseline_recs and groups:
+            for (ds, _), recs in groups.items():
+                if ds == dataset:
+                    baseline_recs = recs
+                    break
+        if baseline_recs:
+            base_delay = mean([r.avg_delay for r in baseline_recs])
+            base_drift = mean([r.episode_drift for r in baseline_recs])
+            baseline_means[dataset] = (base_delay, base_drift)
+
+    
+    # 计算统计
     rows = []
     for (dataset, policy_name), recs in sorted(groups.items()):
         delays = [r.avg_delay for r in recs]
@@ -1014,7 +1035,16 @@ def save_summary(
         avg_tasks_scheduled = [r.avg_num_tasks_scheduled for r in recs]
         util_r_pads = [r.util_r_pad for r in recs]
         
-        combined = [d + tuning_lambda * dr for d, dr in zip(delays, drifts)]
+        # ?????????????????
+        base_delay, base_drift = baseline_means.get(dataset, (0.0, 0.0))
+        eps = 1e-9
+        base_delay = base_delay if base_delay > eps else eps
+        base_drift = base_drift if base_drift > eps else eps
+        w1, w2 = 0.5, 0.5
+        combined = [
+            w1 * (d / base_delay) + w2 * (dr / base_drift)
+            for d, dr in zip(delays, drifts)
+        ]
         
         # LLM 相关统计
         llm_calls = [r.llm_calls for r in recs]

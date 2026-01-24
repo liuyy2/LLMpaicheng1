@@ -248,6 +248,27 @@ def compute_summary_stats(
         key = (rec.dataset, rec.policy_name)
         groups[key].append(rec)
     
+    # 基线策略优先级，用于归一化综合成本
+    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
+    baseline_means: Dict[str, Tuple[float, float]] = {}
+    datasets = sorted({k[0] for k in groups.keys()})
+    for dataset in datasets:
+        baseline_recs = None
+        for name in baseline_priority:
+            baseline_recs = groups.get((dataset, name))
+            if baseline_recs:
+                break
+        if not baseline_recs and groups:
+            # 回退到该数据集的任一策略
+            for (ds, _), recs in groups.items():
+                if ds == dataset:
+                    baseline_recs = recs
+                    break
+        if baseline_recs:
+            base_delay = mean([r.avg_delay for r in baseline_recs])
+            base_drift = mean([r.episode_drift for r in baseline_recs])
+            baseline_means[dataset] = (base_delay, base_drift)
+
     stats = {}
     for key, recs in groups.items():
         dataset, policy_name = key
@@ -293,7 +314,16 @@ def compute_summary_stats(
         )
         avg_cache_hit_rate = weighted_cache_hit / total_calls if total_calls > 0 else 0.0
         
-        combined = [d + tuning_lambda * dr for d, dr in zip(delays, drifts)]
+        # 归一化综合成本：相对基线的加权比例
+        base_delay, base_drift = baseline_means.get(dataset, (0.0, 0.0))
+        eps = 1e-9
+        base_delay = base_delay if base_delay > eps else eps
+        base_drift = base_drift if base_drift > eps else eps
+        w1, w2 = 0.5, 0.5
+        combined = [
+            w1 * (d / base_delay) + w2 * (dr / base_drift)
+            for d, dr in zip(delays, drifts)
+        ]
         
         stats[key] = {
             "dataset": dataset,
@@ -1029,7 +1059,23 @@ def save_enhanced_summary_with_tests(
     for rec in test_records:
         by_seed[rec.seed][rec.policy_name] = rec
     
+    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
     baseline = "fixed_tuned"
+    baseline_recs = None
+    for name in baseline_priority:
+        baseline_recs = [r for r in test_records if r.policy_name == name]
+        if baseline_recs:
+            baseline = name
+            break
+    if not baseline_recs:
+        baseline_recs = []
+
+    base_delay = mean([r.avg_delay for r in baseline_recs]) if baseline_recs else 0.0
+    base_drift = mean([r.episode_drift for r in baseline_recs]) if baseline_recs else 0.0
+    eps = 1e-9
+    base_delay = base_delay if base_delay > eps else eps
+    base_drift = base_drift if base_drift > eps else eps
+    w1, w2 = 0.5, 0.5
     comparisons = {}
     
     for policy in set(r.policy_name for r in test_records):
@@ -1041,8 +1087,10 @@ def save_enhanced_summary_with_tests(
         
         for seed, policies in by_seed.items():
             if baseline in policies and policy in policies:
-                b_combined = policies[baseline].avg_delay + tuning_lambda * policies[baseline].episode_drift
-                o_combined = policies[policy].avg_delay + tuning_lambda * policies[policy].episode_drift
+                b = policies[baseline]
+                o = policies[policy]
+                b_combined = w1 * (b.avg_delay / base_delay) + w2 * (b.episode_drift / base_drift)
+                o_combined = w1 * (o.avg_delay / base_delay) + w2 * (o.episode_drift / base_drift)
                 baseline_vals.append(b_combined)
                 other_vals.append(o_combined)
         
@@ -1436,7 +1484,7 @@ def run_analysis(
         os.path.join(output_dir, "policy_comparison_combined.png"),
         dataset=primary_dataset,
         metric="combined_mean",
-        ylabel="Combined Score (delay + 5*drift)"
+        ylabel="Normalized Cost (baseline=1.0)"
     )
     
     plot_policy_comparison_bars(
