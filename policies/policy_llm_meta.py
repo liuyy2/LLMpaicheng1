@@ -471,17 +471,17 @@ class LLMPolicyLogger:
 # Prompt 构建
 # ============================================================================
 
-SYSTEM_PROMPT = """你是一个火箭发射排程优化的“元参数调参器”。你的目标是：在不显著增加延迟的前提下，尽量降低计划漂移（drift）。
+SYSTEM_PROMPT = """你是火箭发射排程优化的“元参数调参器”。你的任务是为 CP-SAT 优化器生成一组元参数，使得在可接受的延迟水平下，尽量降低计划漂移（drift），并在不确定或信号弱时保持稳健。
 
 重要规则：
 1. 你只能输出元参数 JSON，严禁输出具体的任务排程
 2. 参数将传递给 CP-SAT 优化器进行实际排程
 3. 只输出 JSON，不要解释，不要代码块
 
-当前调参基线（无强信号时直接返回）：
+可参考的基线参数：
 {"w_delay": 50.0, "w_shift": 0.0, "w_switch": 180.0, "freeze_horizon": 0}
 
-建议输出范围（优先在此范围内微调）：
+可调整范围（可超出但需谨慎）：
 - w_delay: 20.0 - 80.0
 - w_shift: 0.0 - 8.0
 - w_switch: 60.0 - 240.0
@@ -501,27 +501,27 @@ def build_user_prompt(features: StateFeatures) -> str:
 ```
 
 特征说明：
+
 - window_loss_pct: 窗口可用性损失比例 (0-1)
-- window_remaining_pct: 剩余窗口比例 (0-1)
-- pad_outage_overlap_hours: 未来视野内 Pad 不可用时长（小时）
-- pad_outage_task_count: 受 outage 影响的任务数
-- delay_increase_minutes: 预估延误增加（分钟）
-- current_total_delay_minutes: 当前累计延误（分钟）
-- num_tasks_in_horizon: 视野内任务数
+- pad_outage_overlap_hours: 未来视野内 R_pad 不可用时长（小时）
+- delay_increase_minutes: 预计延误增加（分钟）
+- pad_pressure: R_pad 压力（需求/有效容量）
+- slack_min_minutes: 最小 slack（分钟）
+- resource_conflict_pressure: 资源冲突压力（R3/R4）
 - num_urgent_tasks: 紧急任务数
-- completed_rate: 已完成任务比例
-- recent_shift_count: 最近一次重排的时间变化数
-- recent_switch_count: 最近一次重排的 pad 切换数
+- trend_window_loss: 窗口损失的长程趋势
+- trend_pad_pressure: Pad 压力的长程趋势
+- trend_slack_min_minutes: 最小 slack 的长程趋势
+- trend_delay_increase_minutes: 延误增加的长程趋势
+- volatility_pad_pressure: Pad 压力波动度
 
-决策原则（以当前调参基线为锚点，按信号强度微调）：
-- 默认返回基线：w_delay=50, w_shift=0, w_switch=180, freeze_horizon=0
-- window_loss_pct 高 或 window_remaining_pct 低 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
-- pad_outage_overlap_hours 高 且 pad_outage_task_count>0 → 允许切换：w_switch↓（但不低于 60）
-- num_urgent_tasks 高 或 delay_increase_minutes 高 → 提高时效：w_delay↑，同时保持 w_shift 低、freeze_horizon 低
-- recent_shift_count / recent_switch_count 高 → 稳定优先：w_shift↑, w_switch↑, freeze_horizon↑
-- completed_rate 高 → 更保守：w_shift↑, w_switch↑
+目标与权衡：
 
-输出仅 JSON（不要代码块/解释）："""
+- 主要目标：降低 drift（计划漂移）
+- 不能显著牺牲延误（delay）
+- 若信号矛盾或强度不足，倾向稳健策略
+
+请直接输出 JSON（不要解释、不要代码块）："""
     
     return prompt
 

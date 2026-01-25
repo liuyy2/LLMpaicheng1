@@ -603,9 +603,14 @@ def grid_search_tuning(
         print(" 开始网格搜索调参（并行处理）")
         print("="*70)
     
-    # 构建参数网格
-    # freeze_horizon: hours -> slots (1h = 6 slots)
-    freeze_slots = [int(h * 6) for h in exp_config.freeze_horizon_hours]
+    # build parameter grid
+    # freeze_horizon: hours -> slots (based on Config.slot_minutes)
+    # e.g. slot_minutes=15 => 1h = 4 slots
+    slot_minutes = DEFAULT_CONFIG.slot_minutes
+    freeze_slots = [
+        int(round(h * 60 / slot_minutes))
+        for h in exp_config.freeze_horizon_hours
+    ]
     
     param_grid = list(itertools.product(
         freeze_slots,
@@ -613,42 +618,16 @@ def grid_search_tuning(
         exp_config.w_shift_values,
         exp_config.w_switch_values
     ))
-    
-    if verbose:
-        print(f"参数组合数: {len(param_grid)}")
-        print(f"训练集 episodes: {len(train_assignments)}")
-        print(f"并行进程数: {exp_config.max_workers}")
-        print(f"总任务数: {len(param_grid) * len(train_assignments)}")
-    
-    tuning_results: List[TuningResult] = []
-    best_score = float('inf')
-    best_params = None
-    
-    total_combos = len(param_grid)
-    
-    for combo_idx, (freeze_h, w_delay, w_shift, w_switch) in enumerate(param_grid):
-        if verbose:
-            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, "
-                  f"w_delay={w_delay}, w_shift={w_shift}, w_switch={w_switch}")
-        
-        policy_params = {
-            "w_delay": w_delay,
-            "w_shift": w_shift,
-            "w_switch": w_switch,
-            "freeze_horizon": freeze_h
-        }
-        
-        # 准备并行任务参数
+
+    def _evaluate_policy(policy_name: str, policy_params: Dict[str, Any]) -> Tuple[float, float, float]:
         tasks = [
-            (seed, level, "fixed", policy_params, "train", exp_config.solver_timeout_s, None, None)
+            (seed, level, policy_name, policy_params, "train", exp_config.solver_timeout_s, None, None)
             for seed, level in train_assignments
         ]
-        
-        # 并行执行所有训练 episodes
         delays = []
         drifts = []
         solve_times = []
-        
+
         if exp_config.max_workers <= 1:
             completed = 0
             for task in tasks:
@@ -667,7 +646,7 @@ def grid_search_tuning(
 
                 completed += 1
                 if verbose and completed % 10 == 0:
-                    print(f"  进度: {completed}/{len(tasks)}")
+                    print(f"  progress: {completed}/{len(tasks)}")
         else:
             with ThreadPoolExecutor(max_workers=exp_config.max_workers) as executor:
                 futures = {executor.submit(run_single_episode_wrapper, task): task for task in tasks}
@@ -690,12 +669,42 @@ def grid_search_tuning(
 
                     completed += 1
                     if verbose and completed % 10 == 0:
-                        print(f"  进度: {completed}/{len(tasks)}")
+                        print(f"  progress: {completed}/{len(tasks)}")
+
         avg_delay = sum(delays) / len(delays) if delays else float('inf')
         avg_drift = sum(drifts) / len(drifts) if drifts else float('inf')
         avg_solve = sum(solve_times) / len(solve_times) if solve_times else 0.0
+        return avg_delay, avg_drift, avg_solve
+    
+    if verbose:
+        print(f"参数组合数: {len(param_grid)}")
+        print(f"训练集 episodes: {len(train_assignments)}")
+        print(f"并行进程数: {exp_config.max_workers}")
+        print(f"总任务数: {len(param_grid) * len(train_assignments)}")
+
+    
+    tuning_results: List[TuningResult] = []
+    best_score = float('inf')
+    best_params = None
+    
+    total_combos = len(param_grid)
+    
+    for combo_idx, (freeze_h, w_delay, w_shift, w_switch) in enumerate(param_grid):
+        if verbose:
+            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, "
+                  f"w_delay={w_delay}, w_shift={w_shift}, w_switch={w_switch}")
         
-        # 综合得分
+        policy_params = {
+            "w_delay": w_delay,
+            "w_shift": w_shift,
+            "w_switch": w_switch,
+            "freeze_horizon": freeze_h
+        }
+        
+        # 准备并行任务参数
+        avg_delay, avg_drift, avg_solve = _evaluate_policy("fixed", policy_params)
+        
+        # combined score
         combined = avg_delay + exp_config.tuning_lambda * avg_drift
         
         result = TuningResult(
@@ -827,7 +836,7 @@ def run_evaluation(
                         all_records.append(record)
                     except Exception as e:
                         logger.error(f"Error: seed={seed}, policy={policy_name}: {e}")
-                        # ????
+        # ???????
                         all_records.append(_create_failed_record(
                             seed, level, policy_name, dataset
                         ))
@@ -968,12 +977,12 @@ def save_summary(
     filepath: str,
     tuning_lambda: float = 5.0
 ):
-    """计算并保存汇总统计"""
+    """Compute and save summary statistics."""
     import math
-    
+
     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-    
-    # 按 (dataset, policy_name) 分组
+
+    # group by (dataset, policy_name)
     groups: Dict[Tuple[str, str], List[EpisodeMetricsRecord]] = {}
     for record in records:
         key = (record.dataset, record.policy_name)
@@ -983,41 +992,18 @@ def save_summary(
 
     def mean(values):
         return sum(values) / len(values) if values else 0.0
-    
+
     def std(values):
         if len(values) < 2:
             return 0.0
         m = mean(values)
         return math.sqrt(sum((v - m) ** 2 for v in values) / (len(values) - 1))
-    
+
     def ci95(values):
-        """95% 置信区间半宽"""
         if len(values) < 2:
             return 0.0
         return 1.96 * std(values) / math.sqrt(len(values))
-    
-    # ?????????????????
-    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
-    baseline_means: Dict[str, Tuple[float, float]] = {}
-    datasets = sorted({k[0] for k in groups.keys()})
-    for dataset in datasets:
-        baseline_recs = None
-        for name in baseline_priority:
-            baseline_recs = groups.get((dataset, name))
-            if baseline_recs:
-                break
-        if not baseline_recs and groups:
-            for (ds, _), recs in groups.items():
-                if ds == dataset:
-                    baseline_recs = recs
-                    break
-        if baseline_recs:
-            base_delay = mean([r.avg_delay for r in baseline_recs])
-            base_drift = mean([r.episode_drift for r in baseline_recs])
-            baseline_means[dataset] = (base_delay, base_drift)
 
-    
-    # 计算统计
     rows = []
     for (dataset, policy_name), recs in sorted(groups.items()):
         delays = [r.avg_delay for r in recs]
@@ -1034,24 +1020,17 @@ def save_summary(
         avg_frozens = [r.avg_frozen for r in recs]
         avg_tasks_scheduled = [r.avg_num_tasks_scheduled for r in recs]
         util_r_pads = [r.util_r_pad for r in recs]
-        
-        # ?????????????????
-        base_delay, base_drift = baseline_means.get(dataset, (0.0, 0.0))
-        eps = 1e-9
-        base_delay = base_delay if base_delay > eps else eps
-        base_drift = base_drift if base_drift > eps else eps
-        w1, w2 = 0.5, 0.5
+
         combined = [
-            w1 * (d / base_delay) + w2 * (dr / base_drift)
+            d + tuning_lambda * dr
             for d, dr in zip(delays, drifts)
         ]
-        
-        # LLM 相关统计
+
         llm_calls = [r.llm_calls for r in recs]
         llm_tokens = [r.llm_total_tokens for r in recs]
         llm_fallbacks = [r.llm_fallback_count for r in recs]
         llm_cache_hits = [r.llm_cache_hit_rate for r in recs]
-        
+
         row = {
             "dataset": dataset,
             "policy_name": policy_name,
@@ -1078,24 +1057,22 @@ def save_summary(
             "util_r_pad_mean": round(mean(util_r_pads), 4),
             "util_r_pad_ci95": round(ci95(util_r_pads), 4),
             "avg_solve_time_ms_mean": round(mean(solve_times), 1),
-            # LLM 统计
             "llm_calls_mean": round(mean(llm_calls), 1),
             "llm_tokens_mean": round(mean(llm_tokens), 0),
             "llm_fallback_mean": round(mean(llm_fallbacks), 2),
             "llm_cache_hit_rate_mean": round(mean(llm_cache_hits), 4)
         }
         rows.append(row)
-    
+
     fieldnames = list(rows[0].keys()) if rows else []
-    
-    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-    
-    print(f"保存汇总统计: {filepath}")
 
+    print(f"Saved summary: {filepath}")
 
 def save_best_params(params: Dict[str, Any], filepath: str):
     """保存最优参数"""
@@ -1554,7 +1531,7 @@ def main():
     )
     parser.add_argument(
         "--lambda", dest="tuning_lambda", type=float, default=5.0,
-        help="综合目标中 drift 的权重 (default: 5.0)"
+        help="drift weight in combined score (default: 5.0)"
     )
     parser.add_argument(
         "--quick", action="store_true",
