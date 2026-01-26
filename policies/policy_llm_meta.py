@@ -479,12 +479,12 @@ SYSTEM_PROMPT = """你是火箭发射排程优化的“元参数调参器”。�
 3. 只输出 JSON，不要解释，不要代码块
 
 可参考的基线参数：
-{"w_delay": 50.0, "w_shift": 0.0, "w_switch": 180.0, "freeze_horizon": 0}
+{"w_delay": 10.0, "w_shift": 0.3, "w_switch": 40.0, "freeze_horizon": 12}
 
 可调整范围（可超出但需谨慎）：
-- w_delay: 20.0 - 80.0
-- w_shift: 0.0 - 8.0
-- w_switch: 60.0 - 240.0
+- w_delay: 0.0 - 20.0
+- w_shift: 0.0 - 2.0
+- w_switch: 20.0 - 60.0
 - freeze_horizon: 0 - 24
 
 输出格式（严格 JSON）：

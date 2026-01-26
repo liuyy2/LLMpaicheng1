@@ -1,13 +1,5 @@
-results_baseline_60/
-results_baseline_30/
-results_llm_60/
-results_combined/
-results_llm_30/
-results_baseline_30_env1/
-results_llm_chat_30_env1/
-results_30_env1/
-results_llm_chat_30_env1_pr/
-results_30_env1_pr/
+results_V2.5/
+logs/
 __pycache__/
 results_test_llm/
 results_v2_2/
@@ -21,3 +13,4 @@ results_V2.5_baseline_30_3/
 results_V2.5_quick/
 results_quick_1/
 results_quick_2/
+results_V2.5_LLM_30_3/

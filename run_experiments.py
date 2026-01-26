@@ -38,7 +38,7 @@ from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
     FixedWeightPolicy, NoFreezePolicy, GreedyPolicy, MockLLMPolicy,
-    create_policy
+    create_policy, MetaParams
 )
 
 # 可选导入 RealLLMPolicy（需要 llm_client）
@@ -79,18 +79,24 @@ class ExperimentConfig:
     # 扰动强度分布（轻/中/重各 1/3）
     disturbance_levels: List[str] = field(default_factory=lambda: ["light", "medium", "heavy"])
     
-    # 调参网格
-    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 2, 6, 12])
-    w_delay_values: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 50.0])
-    w_shift_values: List[float] = field(default_factory=lambda: [0.0, 0.2, 1.0, 2.0])
-    w_switch_values: List[float] = field(default_factory=lambda: [0, 60, 180, 600])
+    # 调参网格（扩展上界，保持4×4×4×4=256组合）
+    freeze_horizon_hours: List[float] = field(default_factory=lambda: [4, 8, 12, 16])  # 增加上界到16小时
+    w_delay_values: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0, 30.0])  # 增加上界到30
+    w_shift_values: List[float] = field(default_factory=lambda: [0.4, 0.8, 1.2, 2.0])  # 增加上界到2.0
+    w_switch_values: List[float] = field(default_factory=lambda: [10, 30, 60, 100])  # 增加上界到100
     trigger_window_loss_pct: List[float] = field(default_factory=lambda: [0.1, 0.25, 0.4])
     
-    # 综合目标权重
-    tuning_lambda: float = 5.0  # delay + lambda * drift
+    # 综合目标权重（软约束）
+    tuning_lambda: float = 5.0  # legacy: delay + lambda * drift
+    tuning_delay_tolerance: float = 0.10  # 放宽到10%容忍度
+    tuning_weight_delay: float = 0.50  # 准时性（最重要）
+    tuning_weight_drift: float = 0.20  # 稳定性
+    tuning_weight_time_dev: float = 0.10  # 时间偏差
+    tuning_weight_forced_replan: float = 0.10  # 强制重排
+    tuning_weight_feasible: float = 0.10  # 可行性惩罚
     
     # 求解器
-    solver_timeout_s: float = 10.0  # 每次求解限时
+    solver_timeout_s: float = 20.0  # 每次求解限时
     
     # 并行处理
     max_workers: int = 1  # 并行进程数（1为串行，设置>1启用并行）
@@ -109,6 +115,13 @@ class ExperimentConfig:
     llm_temperature: float = 0.0
     llm_top_p: float = 1.0
 
+
+BASELINE_FIXED_DEFAULT = {
+    "w_delay": 10.0,
+    "w_shift": 1.0,
+    "w_switch": 5.0,
+    "freeze_horizon": 12
+}
 
 # 扰动强度对应的 Config 参数
 DISTURBANCE_CONFIGS = {
@@ -202,7 +215,16 @@ class TuningResult:
     # 训练集指标
     avg_delay: float
     avg_drift: float
-    combined_score: float  # delay + lambda * drift
+    avg_time_deviation_min: float
+    avg_forced_replan_rate: float
+    avg_feasible_rate: float
+    delay_ratio: float
+    drift_ratio: float
+    time_dev_ratio: float
+    forced_replan_ratio: float
+    delay_ok: bool
+    feasible_ok: bool
+    combined_score: float  # normalized weighted score
     
     # 统计
     num_episodes: int
@@ -237,7 +259,7 @@ class RollingLogEntry:
 # 场景生成
 # ============================================================================
 
-def create_config_for_disturbance(level: str, solver_timeout: float = 10.0) -> Config:
+def create_config_for_disturbance(level: str, solver_timeout: float = 20.0) -> Config:
     """根据扰动强度创建配置"""
     params = DISTURBANCE_CONFIGS.get(level, DISTURBANCE_CONFIGS["medium"])
     
@@ -303,7 +325,7 @@ def run_single_episode(
     policy_name: str,
     policy_params: Dict[str, Any],
     dataset: str,
-    solver_timeout: float = 10.0,
+    solver_timeout: float = 20.0,
     exp_config: Optional[ExperimentConfig] = None,
     output_dir: Optional[str] = None
 ) -> EpisodeMetricsRecord:
@@ -394,12 +416,29 @@ def run_single_episode(
             enable_thinking=False
         )
         
+        fallback_params = None
+        if output_dir:
+            best_params_path = os.path.join(output_dir, "best_params.json")
+            if os.path.exists(best_params_path):
+                try:
+                    with open(best_params_path, "r", encoding="utf-8") as f:
+                        best = json.load(f)
+                    fallback_params = MetaParams(
+                        w_delay=best.get("w_delay", 10.0),
+                        w_shift=best.get("w_shift", 1.0),
+                        w_switch=best.get("w_switch", 5.0),
+                        freeze_horizon=best.get("freeze_horizon", 12)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to load best_params.json for fallback: {e}")
+
         policy = RealLLMPolicy(
             llm_config=llm_config,
             policy_name="llm_real",
             log_dir=log_dir,
             enable_logging=True,
-            episode_id=episode_id
+            episode_id=episode_id,
+            fallback_params=fallback_params
         )
     else:
         raise ValueError(f"Unknown policy: {policy_name}")
@@ -587,31 +626,19 @@ def grid_search_tuning(
     verbose: bool = True
 ) -> Tuple[Dict[str, Any], List[TuningResult]]:
     """
-    在训练集上网格搜索最优参数（使用并行处理）
-    
-    参数空间：
-    - freeze_horizon_hours
-    - w_shift
-    - w_switch
-    - trigger_window_loss_pct (暂不使用，保留接口)
-    
-    Returns:
-        (best_params, all_tuning_results)
+    Grid search on train set with normalized multi-metric score.
     """
     if verbose:
         print("\n" + "="*70)
-        print(" 开始网格搜索调参（并行处理）")
+        print(" Grid search tuning (train set)")
         print("="*70)
-    
-    # build parameter grid
-    # freeze_horizon: hours -> slots (based on Config.slot_minutes)
-    # e.g. slot_minutes=15 => 1h = 4 slots
+
     slot_minutes = DEFAULT_CONFIG.slot_minutes
     freeze_slots = [
         int(round(h * 60 / slot_minutes))
         for h in exp_config.freeze_horizon_hours
     ]
-    
+
     param_grid = list(itertools.product(
         freeze_slots,
         exp_config.w_delay_values,
@@ -619,13 +646,16 @@ def grid_search_tuning(
         exp_config.w_switch_values
     ))
 
-    def _evaluate_policy(policy_name: str, policy_params: Dict[str, Any]) -> Tuple[float, float, float]:
+    def _evaluate_policy(policy_name: str, policy_params: Dict[str, Any]) -> Dict[str, float]:
         tasks = [
             (seed, level, policy_name, policy_params, "train", exp_config.solver_timeout_s, None, None)
             for seed, level in train_assignments
         ]
         delays = []
         drifts = []
+        time_devs = []
+        forced_replans = []
+        feasible_rates = []
         solve_times = []
 
         if exp_config.max_workers <= 1:
@@ -635,6 +665,9 @@ def grid_search_tuning(
                     record = run_single_episode_wrapper(task)
                     delays.append(record.avg_delay)
                     drifts.append(record.episode_drift)
+                    time_devs.append(record.avg_time_deviation_min)
+                    forced_replans.append(record.forced_replan_rate)
+                    feasible_rates.append(record.feasible_rate)
                     solve_times.append(record.avg_solve_time_ms)
                 except Exception as e:
                     seed = task[0]
@@ -642,6 +675,9 @@ def grid_search_tuning(
                         print(f"  Warning: seed {seed} failed: {e}")
                     delays.append(100.0)
                     drifts.append(1.0)
+                    time_devs.append(999.0)
+                    forced_replans.append(1.0)
+                    feasible_rates.append(0.0)
                     solve_times.append(0.0)
 
                 completed += 1
@@ -658,6 +694,9 @@ def grid_search_tuning(
                         record = future.result()
                         delays.append(record.avg_delay)
                         drifts.append(record.episode_drift)
+                        time_devs.append(record.avg_time_deviation_min)
+                        forced_replans.append(record.forced_replan_rate)
+                        feasible_rates.append(record.feasible_rate)
                         solve_times.append(record.avg_solve_time_ms)
                     except Exception as e:
                         seed = task[0]
@@ -665,91 +704,165 @@ def grid_search_tuning(
                             print(f"  Warning: seed {seed} failed: {e}")
                         delays.append(100.0)
                         drifts.append(1.0)
+                        time_devs.append(999.0)
+                        forced_replans.append(1.0)
+                        feasible_rates.append(0.0)
                         solve_times.append(0.0)
 
                     completed += 1
                     if verbose and completed % 10 == 0:
                         print(f"  progress: {completed}/{len(tasks)}")
 
-        avg_delay = sum(delays) / len(delays) if delays else float('inf')
-        avg_drift = sum(drifts) / len(drifts) if drifts else float('inf')
-        avg_solve = sum(solve_times) / len(solve_times) if solve_times else 0.0
-        return avg_delay, avg_drift, avg_solve
-    
-    if verbose:
-        print(f"参数组合数: {len(param_grid)}")
-        print(f"训练集 episodes: {len(train_assignments)}")
-        print(f"并行进程数: {exp_config.max_workers}")
-        print(f"总任务数: {len(param_grid) * len(train_assignments)}")
+        def _mean(values, default=0.0):
+            return sum(values) / len(values) if values else default
 
-    
+        return {
+            "avg_delay": _mean(delays, float('inf')),
+            "avg_drift": _mean(drifts, float('inf')),
+            "avg_time_deviation_min": _mean(time_devs, float('inf')),
+            "avg_forced_replan_rate": _mean(forced_replans, 1.0),
+            "avg_feasible_rate": _mean(feasible_rates, 0.0),
+            "avg_solve_time_ms": _mean(solve_times, 0.0)
+        }
+
+    if verbose:
+        print(f"Param combos: {len(param_grid)}")
+        print(f"Train episodes: {len(train_assignments)}")
+        print(f"Max workers: {exp_config.max_workers}")
+        print(f"Total tasks: {len(param_grid) * len(train_assignments)}")
+
+    baseline_fixed = _evaluate_policy("fixed", BASELINE_FIXED_DEFAULT)
+
+    eps = 1e-9
+    base_delay = max(eps, baseline_fixed["avg_delay"])
+    base_drift = max(eps, baseline_fixed["avg_drift"])
+    base_time_dev = max(eps, baseline_fixed["avg_time_deviation_min"])
+    base_forced = max(eps, baseline_fixed["avg_forced_replan_rate"])
+    base_feasible = baseline_fixed["avg_feasible_rate"]
+
+    w_delay = exp_config.tuning_weight_delay
+    w_drift = exp_config.tuning_weight_drift
+    w_time = exp_config.tuning_weight_time_dev
+    w_forced = exp_config.tuning_weight_forced_replan
+    w_sum = w_delay + w_drift + w_time + w_forced
+    if w_sum > 0:
+        w_delay, w_drift, w_time, w_forced = [w / w_sum for w in (w_delay, w_drift, w_time, w_forced)]
+
+    if verbose:
+        print("\nBaseline (fixed_default) train stats:")
+        print(f"  delay={baseline_fixed['avg_delay']:.3f}, drift={baseline_fixed['avg_drift']:.5f}, time_dev={baseline_fixed['avg_time_deviation_min']:.3f}, forced={baseline_fixed['avg_forced_replan_rate']:.3f}, feasible={baseline_fixed['avg_feasible_rate']:.3f}")
+        print("Baseline thresholds:")
+        print(f"  delay<= {base_delay * (1 + exp_config.tuning_delay_tolerance):.3f} (tol={exp_config.tuning_delay_tolerance*100:.1f}%)")
+        print(f"  feasible>= {base_feasible:.3f}")
+
     tuning_results: List[TuningResult] = []
     best_score = float('inf')
     best_params = None
-    
+
     total_combos = len(param_grid)
-    
-    for combo_idx, (freeze_h, w_delay, w_shift, w_switch) in enumerate(param_grid):
+
+    for combo_idx, (freeze_h, w_d, w_s, w_sw) in enumerate(param_grid):
         if verbose:
-            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, "
-                  f"w_delay={w_delay}, w_shift={w_shift}, w_switch={w_switch}")
-        
+            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, w_delay={w_d}, w_shift={w_s}, w_switch={w_sw}")
+
         policy_params = {
-            "w_delay": w_delay,
-            "w_shift": w_shift,
-            "w_switch": w_switch,
+            "w_delay": w_d,
+            "w_shift": w_s,
+            "w_switch": w_sw,
             "freeze_horizon": freeze_h
         }
+
+        stats = _evaluate_policy("fixed", policy_params)
+
+        # 归一化指标（相对baseline）
+        delay_ratio = stats["avg_delay"] / base_delay
+        drift_ratio = stats["avg_drift"] / base_drift
+        time_dev_ratio = stats["avg_time_deviation_min"] / base_time_dev
+        forced_ratio = stats["avg_forced_replan_rate"] / base_forced
+
+        # 可行性惩罚（如果低于baseline）
+        feasible_penalty = max(0, (base_feasible - stats["avg_feasible_rate"]) / max(base_feasible, 1e-9))
+
+        # 软约束：全部用加权求和（移除硬约束）
+        combined = (
+            w_delay * delay_ratio +
+            w_drift * drift_ratio +
+            w_time * time_dev_ratio +
+            w_forced * forced_ratio +
+            exp_config.tuning_weight_feasible * feasible_penalty  # 新增可行性惩罚
+        )
         
-        # 准备并行任务参数
-        avg_delay, avg_drift, avg_solve = _evaluate_policy("fixed", policy_params)
-        
-        # combined score
-        combined = avg_delay + exp_config.tuning_lambda * avg_drift
-        
+        # 记录是否满足基本要求（用于分析，不影响选择）
+        delay_ok = stats["avg_delay"] <= base_delay * (1 + exp_config.tuning_delay_tolerance)
+        feasible_ok = stats["avg_feasible_rate"] >= base_feasible - 1e-9
+
         result = TuningResult(
             freeze_horizon_slots=freeze_h,
-            w_delay=w_delay,
-            w_shift=w_shift,
-            w_switch=w_switch,
-            avg_delay=avg_delay,
-            avg_drift=avg_drift,
+            w_delay=w_d,
+            w_shift=w_s,
+            w_switch=w_sw,
+            avg_delay=stats["avg_delay"],
+            avg_drift=stats["avg_drift"],
+            avg_time_deviation_min=stats["avg_time_deviation_min"],
+            avg_forced_replan_rate=stats["avg_forced_replan_rate"],
+            avg_feasible_rate=stats["avg_feasible_rate"],
+            delay_ratio=delay_ratio,
+            drift_ratio=drift_ratio,
+            time_dev_ratio=time_dev_ratio,
+            forced_replan_ratio=forced_ratio,
+            delay_ok=delay_ok,
+            feasible_ok=feasible_ok,
             combined_score=combined,
             num_episodes=len(train_assignments),
-            avg_solve_time_ms=avg_solve
+            avg_solve_time_ms=stats["avg_solve_time_ms"]
         )
         tuning_results.append(result)
-        
+
         if verbose:
-            print(f"  avg_delay={avg_delay:.2f}, avg_drift={avg_drift:.4f}, "
-                  f"combined={combined:.2f}")
-        
-        # 更新最优
+            print(
+                f"  delay={stats['avg_delay']:.3f}, drift={stats['avg_drift']:.5f}, "
+                f"time_dev={stats['avg_time_deviation_min']:.3f}, forced={stats['avg_forced_replan_rate']:.3f}, "
+                f"feasible={stats['avg_feasible_rate']:.3f}, combined={combined:.4f}, ok={delay_ok and feasible_ok}"
+            )
+
         if combined < best_score:
             best_score = combined
             best_params = {
-                "w_delay": w_delay,
-                "w_shift": w_shift,
-                "w_switch": w_switch,
+                "w_delay": w_d,
+                "w_shift": w_s,
+                "w_switch": w_sw,
                 "freeze_horizon": freeze_h
             }
-    
+
     if verbose:
-        print(f"\n最优参数: {best_params}")
-        print(f"最优得分: {best_score:.2f}")
-    
+        print(f"\nBest params: {best_params}")
+        print(f"Best score: {best_score:.4f}")
+        
+        # 边界检查警告
+        slot_minutes = DEFAULT_CONFIG.slot_minutes
+        freeze_slots = [int(round(h * 60 / slot_minutes)) for h in exp_config.freeze_horizon_hours]
+        at_boundary = []
+        if best_params.get("freeze_horizon") == max(freeze_slots):
+            at_boundary.append("freeze_horizon (max)")
+        if best_params.get("w_delay") == max(exp_config.w_delay_values):
+            at_boundary.append("w_delay (max)")
+        if best_params.get("w_shift") == max(exp_config.w_shift_values):
+            at_boundary.append("w_shift (max)")
+        if best_params.get("w_switch") == max(exp_config.w_switch_values):
+            at_boundary.append("w_switch (max)")
+        
+        if at_boundary:
+            print(f"\n⚠️  WARNING: 最优参数触及网格边界: {', '.join(at_boundary)}")
+            print(f"   建议: 扩大搜索空间或检查参数设置")
+
     return best_params, tuning_results
 
-
-# ============================================================================
-# 批量评估
-# ============================================================================
 
 def run_evaluation(
     assignments: List[Tuple[int, str]],
     policies: Dict[str, Dict[str, Any]],
     dataset: str,
-    solver_timeout: float = 10.0,
+    solver_timeout: float = 20.0,
     max_workers: int = 8,
     verbose: bool = True,
     exp_config: Optional[ExperimentConfig] = None,
@@ -959,7 +1072,10 @@ def save_tuning_results(results: List[TuningResult], filepath: str):
     
     fieldnames = [
         "freeze_horizon_slots", "w_delay", "w_shift", "w_switch",
-        "avg_delay", "avg_drift", "combined_score",
+        "avg_delay", "avg_drift", "avg_time_deviation_min",
+        "avg_forced_replan_rate", "avg_feasible_rate",
+        "delay_ratio", "drift_ratio", "time_dev_ratio", "forced_replan_ratio",
+        "delay_ok", "feasible_ok", "combined_score",
         "num_episodes", "avg_solve_time_ms"
     ]
     
@@ -1169,12 +1285,9 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     # 3. 定义所有策略
     policies = {
         "fixed_tuned": best_params,  # 调优后的固定策略
-        "fixed_default": {
-            "w_delay": 10.0, "w_shift": 1.0, "w_switch": 5.0, "freeze_horizon": 12
-        },
+        "fixed_default": BASELINE_FIXED_DEFAULT,
         "nofreeze": {},
         "greedy": {},
-        "mockllm": {}
     }
     
     # 4. 在测试集上评估
@@ -1264,12 +1377,9 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
     # 定义所有策略（使用最优参数）
     policies = {
         "fixed_tuned": best_params,
-        "fixed_default": {
-            "w_delay": 10.0, "w_shift": 1.0, "w_switch": 5.0, "freeze_horizon": 12
-        },
+        "fixed_default": BASELINE_FIXED_DEFAULT,
         "nofreeze": {},
         "greedy": {},
-        "mockllm": {}
     }
     
     # 在训练集上评估所有策略（完整记录）
@@ -1361,13 +1471,11 @@ def run_test_only(
 
     all_policies = {
         "fixed_tuned": best_params,
-        "fixed_default": {
-            "w_delay": 10.0, "w_shift": 1.0, "w_switch": 5.0, "freeze_horizon": 12
-        },
+        "fixed_default": BASELINE_FIXED_DEFAULT,
         "nofreeze": {},
         "greedy": {},
         "mockllm": {},
-        "llm_real": {}  # LLM 参数通过 exp_config 传递
+        "llm_real": {}  # LLM params from exp_config
     }
     
     # 过滤选定的策略
@@ -1526,7 +1634,7 @@ def main():
         help="输出目录 (default: results/)"
     )
     parser.add_argument(
-        "--solver-timeout", type=float, default=10.0,
+        "--solver-timeout", type=float, default=20.0,
         help="每次 CP-SAT 求解超时秒数 (default: 10.0)"
     )
     parser.add_argument(
@@ -1609,7 +1717,7 @@ def main():
         print("快速测试模式: train=9, test=9")
     
     # 解析策略列表
-    all_baseline_policies = ["fixed_tuned", "fixed_default", "nofreeze", "greedy", "mockllm"]
+    all_baseline_policies = ["fixed_tuned", "fixed_default", "nofreeze", "greedy"]
     if args.policy:
         selected_policies = [p.strip() for p in args.policy.split(",")]
     else:
@@ -1645,11 +1753,11 @@ def main():
     
     # 快速模式下减少调参组合
     if args.quick:
-        exp_config.freeze_horizon_hours = [0, 6]  # 2 instead of 4
-        exp_config.w_delay_values = [5.0, 20.0]   # 2 instead of 4
-        exp_config.w_shift_values = [0.0, 1.0]    # 2 instead of 4
-        exp_config.w_switch_values = [0, 180]     # 2 instead of 4
-        print("  调参网格缩减为 2×2×2×2=16 组合")
+        exp_config.freeze_horizon_hours = [2, 4, 6]
+        exp_config.w_delay_values = [10.0, 12.0]
+        exp_config.w_shift_values = [0.6, 1.0]
+        exp_config.w_switch_values = [10, 20]
+        print("  调参网格缩减为 3×2×2×2=24 组合")
     
     # 根据模式运行
     if args.mode == "full":

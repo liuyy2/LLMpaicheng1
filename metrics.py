@@ -250,9 +250,10 @@ def compute_op_time_drift(
 def compute_op_resource_drift(
     op_id: str,
     old_plan: Optional[PlanV2_1],
-    new_plan: PlanV2_1
+    new_plan: PlanV2_1,
+    op6_windows: Dict[str, List[Tuple[int, int]]]
 ) -> float:
-    """Compute op resource drift."""
+    """Compute op6 window switch drift (0/1) for V2.1."""
     if old_plan is None:
         return 0.0
 
@@ -262,19 +263,38 @@ def compute_op_resource_drift(
     if old_assign is None or new_assign is None:
         return 0.0
 
-    return 1.0 if set(old_assign.resources) != set(new_assign.resources) else 0.0
+    if old_assign.op_index != 6 or new_assign.op_index != 6:
+        return 0.0
+
+    windows = op6_windows.get(op_id, [])
+    if not windows:
+        return 0.0
+
+    def _window_index(start: int, end: int) -> Optional[int]:
+        for idx, (ws, we) in enumerate(windows):
+            if start >= ws and end <= we:
+                return idx
+        return None
+
+    old_idx = _window_index(old_assign.start_slot, old_assign.end_slot)
+    new_idx = _window_index(new_assign.start_slot, new_assign.end_slot)
+    if old_idx is None or new_idx is None:
+        return 0.0
+
+    return 1.0 if old_idx != new_idx else 0.0
 
 
 def compute_op_npd(
     op_id: str,
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
+    op6_windows: Dict[str, List[Tuple[int, int]]],
     horizon: int,
     alpha: float = 0.7,
     beta: float = 0.3
 ) -> float:
     d_time = compute_op_time_drift(op_id, old_plan, new_plan, horizon)
-    d_res = compute_op_resource_drift(op_id, old_plan, new_plan)
+    d_res = compute_op_resource_drift(op_id, old_plan, new_plan, op6_windows)
     return alpha * d_time + beta * d_res
 
 
@@ -282,6 +302,7 @@ def compute_plan_drift_ops(
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
     completed_ops: Set[str],
+    missions: List[Mission],
     horizon: int,
     alpha: float = 0.7,
     beta: float = 0.3
@@ -295,6 +316,12 @@ def compute_plan_drift_ops(
 
     if not common_ops:
         return 0.0, 0, 0, 0.0
+
+    op6_windows: Dict[str, List[Tuple[int, int]]] = {}
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        if op6:
+            op6_windows[op6.op_id] = list(op6.time_windows or [])
 
     total_npd = 0.0
     num_shifts = 0
@@ -311,7 +338,7 @@ def compute_plan_drift_ops(
         total_time_shift += diff
 
         d_time = min(1.0, diff / horizon) if horizon > 0 else 0.0
-        d_res = 1.0 if set(old_assign.resources) != set(new_assign.resources) else 0.0
+        d_res = compute_op_resource_drift(op_id, old_plan, new_plan, op6_windows)
         npd = alpha * d_time + beta * d_res
         total_npd += npd
 
@@ -330,6 +357,7 @@ def compute_rolling_metrics_ops(
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
     completed_ops: Set[str],
+    missions: List[Mission],
     horizon: int,
     solve_time_ms: int,
     is_feasible: bool,
@@ -339,7 +367,7 @@ def compute_rolling_metrics_ops(
     beta: float = 0.3
 ) -> RollingMetrics:
     plan_drift, num_shifts, num_switches, avg_time_shift_slots = compute_plan_drift_ops(
-        old_plan, new_plan, completed_ops, horizon, alpha, beta
+        old_plan, new_plan, completed_ops, missions, horizon, alpha, beta
     )
 
     return RollingMetrics(

@@ -941,6 +941,8 @@ def _solve_v2_1_with_config(
         if intervals:
             model.AddNoOverlap(intervals)
 
+    window_choice_vars: Dict[str, List[cp_model.BoolVar]] = {}
+    prev_window_index: Dict[str, Optional[int]] = {}
     for mission in missions:
         op6 = mission.get_operation(6)
         if not op6 or not op6.time_windows:
@@ -952,6 +954,16 @@ def _solve_v2_1_with_config(
             model.Add(start_vars[op6.op_id] >= ws).OnlyEnforceIf(in_window)
             model.Add(end_vars[op6.op_id] <= we).OnlyEnforceIf(in_window)
         model.AddExactlyOne(window_choice)
+        window_choice_vars[op6.op_id] = window_choice
+        prev_idx = None
+        if prev_plan:
+            prev_assign = prev_plan.get_assignment(op6.op_id)
+            if prev_assign:
+                for idx, (ws, we) in enumerate(op6.time_windows):
+                    if prev_assign.start_slot >= ws and prev_assign.end_slot <= we:
+                        prev_idx = idx
+                        break
+        prev_window_index[op6.op_id] = prev_idx
 
     for op_id, frozen in frozen_ops.items():
         if op_id in start_vars:
@@ -959,6 +971,10 @@ def _solve_v2_1_with_config(
             model.Add(end_vars[op_id] == frozen.end_slot)
 
     objective_terms = []
+    max_shift = max(0, horizon)
+    shift_abs_vars: Dict[str, cp_model.IntVar] = {}
+    switch_vars: Dict[str, cp_model.IntVar] = {}
+
     for mission in missions:
         op6 = mission.get_operation(6)
         if not op6 or op6.op_id not in end_vars:
@@ -967,6 +983,38 @@ def _solve_v2_1_with_config(
         model.AddMaxEquality(delay_var, [0, end_vars[op6.op_id] - mission.due])
         weight = int(config.w_delay * mission.priority * 100)
         objective_terms.append(weight * delay_var)
+
+    if prev_plan:
+        for op in all_ops:
+            prev_assign = prev_plan.get_assignment(op.op_id)
+            if prev_assign and op.op_id in start_vars:
+                shift_abs = model.NewIntVar(0, max_shift, f"shift_{op.op_id}")
+                diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{op.op_id}")
+                model.Add(diff_var == start_vars[op.op_id] - prev_assign.start_slot)
+                model.AddAbsEquality(shift_abs, diff_var)
+                shift_abs_vars[op.op_id] = shift_abs
+            else:
+                shift_abs_vars[op.op_id] = model.NewConstant(0)
+    else:
+        for op in all_ops:
+            shift_abs_vars[op.op_id] = model.NewConstant(0)
+
+    for op_id, choice in window_choice_vars.items():
+        prev_idx = prev_window_index.get(op_id)
+        if prev_idx is not None and 0 <= prev_idx < len(choice):
+            switched = model.NewBoolVar(f"window_switch_{op_id}")
+            model.Add(switched == 0).OnlyEnforceIf(choice[prev_idx])
+            model.Add(switched == 1).OnlyEnforceIf(choice[prev_idx].Not())
+            switch_vars[op_id] = switched
+        else:
+            switch_vars[op_id] = model.NewConstant(0)
+
+    if config.w_shift != 0:
+        for op_id, var in shift_abs_vars.items():
+            objective_terms.append(int(config.w_shift * 100) * var)
+    if config.w_switch != 0:
+        for op_id, var in switch_vars.items():
+            objective_terms.append(int(config.w_switch * 100) * var)
 
     if objective_terms:
         model.Minimize(sum(objective_terms))

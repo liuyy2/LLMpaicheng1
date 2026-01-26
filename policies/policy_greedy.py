@@ -10,13 +10,16 @@
 Baseline B3：用于对比 CP-SAT 优化的价值
 """
 
-from typing import Optional, Tuple, List, Dict, Set
+from typing import Optional, Tuple, List, Dict, Set, Any
 from dataclasses import dataclass
 
 from policies.base import BasePolicy, MetaParams
 from disturbance import SimulationState
 from config import Config
-from solver_cpsat import Task, Pad, Plan, TaskAssignment
+from solver_cpsat import (
+    Task, Pad, Plan, TaskAssignment,
+    PlanV2_1, OpAssignment, Mission, Resource, Operation
+)
 
 
 @dataclass
@@ -145,12 +148,8 @@ class GreedyPolicy(BasePolicy):
         """
         self._call_count += 1
         if hasattr(state, 'missions') and hasattr(state, 'resources'):
-            return MetaParams(
-                w_delay=config.default_w_delay,
-                w_shift=config.default_w_shift,
-                w_switch=config.default_w_switch,
-                freeze_horizon=config.freeze_horizon
-            ), None
+            plan = self._greedy_plan_ops(state, now, config)
+            return None, plan
 
         
         # 获取需要排程的任务
@@ -199,6 +198,242 @@ class GreedyPolicy(BasePolicy):
         
         plan = Plan(timestamp=now, assignments=assignments)
         return None, plan
+
+    def _greedy_plan_ops(
+        self,
+        state: Any,
+        now: int,
+        config: Config
+    ) -> PlanV2_1:
+        """Greedy plan for V2.1 ops without CP-SAT."""
+        horizon_end = min(now + config.horizon_slots, config.sim_total_slots)
+        missions = state.get_schedulable_missions(horizon_end)
+
+        if not missions:
+            return PlanV2_1(timestamp=now, op_assignments=[])
+
+        resource_schedules = self._init_resource_schedules(state)
+        assignments: List[OpAssignment] = []
+        fixed_end: Dict[str, int] = {}
+
+        if state.current_plan:
+            for assign in state.current_plan.op_assignments:
+                if assign.op_id in state.completed_ops or assign.op_id in state.started_ops:
+                    assignments.append(assign)
+                    fixed_end[assign.op_id] = assign.end_slot
+                    self._reserve_interval(resource_schedules, assign.resources, assign.start_slot, assign.end_slot)
+
+        missions_sorted = sorted(
+            missions, key=lambda m: (m.due, m.release, m.mission_id)
+        )
+
+        for mission in missions_sorted:
+            ops_by_idx = {op.op_index: op for op in mission.operations}
+            mission_release = state.actual_releases.get(mission.mission_id, mission.release)
+            prev_end = max(now, mission_release)
+
+            for op_index in sorted(ops_by_idx.keys()):
+                op = ops_by_idx[op_index]
+                if op.op_id in fixed_end:
+                    prev_end = max(prev_end, fixed_end[op.op_id])
+                    continue
+
+                op_release = max(op.release, mission_release)
+                earliest = max(now, op_release, prev_end)
+
+                if op_index == 4 and 5 in ops_by_idx and 6 in ops_by_idx:
+                    op5 = ops_by_idx[5]
+                    op6 = ops_by_idx[6]
+                    if op5.op_id not in fixed_end and op6.op_id not in fixed_end:
+                        start4 = self._find_block_start(
+                            resource_schedules,
+                            earliest,
+                            op,
+                            op5,
+                            op6,
+                            config.sim_total_slots
+                        )
+                        if start4 is not None:
+                            end4 = start4 + op.duration
+                            start5 = end4
+                            end5 = start5 + op5.duration
+                            start6 = end5
+                            end6 = start6 + op6.duration
+                            assignments.append(OpAssignment(
+                                op_id=op.op_id,
+                                mission_id=op.mission_id,
+                                op_index=op.op_index,
+                                resources=op.resources,
+                                start_slot=start4,
+                                end_slot=end4
+                            ))
+                            assignments.append(OpAssignment(
+                                op_id=op5.op_id,
+                                mission_id=op5.mission_id,
+                                op_index=op5.op_index,
+                                resources=op5.resources,
+                                start_slot=start5,
+                                end_slot=end5
+                            ))
+                            assignments.append(OpAssignment(
+                                op_id=op6.op_id,
+                                mission_id=op6.mission_id,
+                                op_index=op6.op_index,
+                                resources=op6.resources,
+                                start_slot=start6,
+                                end_slot=end6
+                            ))
+                            fixed_end[op.op_id] = end4
+                            fixed_end[op5.op_id] = end5
+                            fixed_end[op6.op_id] = end6
+                            self._reserve_interval(resource_schedules, op.resources, start4, end4)
+                            self._reserve_interval(resource_schedules, op5.resources, start5, end5)
+                            self._reserve_interval(resource_schedules, op6.resources, start6, end6)
+                            prev_end = end6
+                            continue
+
+                if op_index == 6 and op.time_windows:
+                    start = self._find_earliest_start_in_windows(
+                        resource_schedules,
+                        op.resources,
+                        earliest,
+                        op.duration,
+                        op.time_windows,
+                        config.sim_total_slots
+                    )
+                else:
+                    start = self._find_earliest_start(
+                        resource_schedules,
+                        op.resources,
+                        earliest,
+                        op.duration,
+                        config.sim_total_slots
+                    )
+
+                if start is None:
+                    continue
+
+                end = start + op.duration
+                assignments.append(OpAssignment(
+                    op_id=op.op_id,
+                    mission_id=op.mission_id,
+                    op_index=op.op_index,
+                    resources=op.resources,
+                    start_slot=start,
+                    end_slot=end
+                ))
+                fixed_end[op.op_id] = end
+                self._reserve_interval(resource_schedules, op.resources, start, end)
+                prev_end = end
+
+        return PlanV2_1(timestamp=now, op_assignments=assignments)
+
+    def _init_resource_schedules(self, state: Any) -> Dict[str, List[Tuple[int, int]]]:
+        schedules: Dict[str, List[Tuple[int, int]]] = {}
+        for res in state.resources:
+            intervals = []
+            for start, end in res.unavailable:
+                intervals.append((start, end + 1))
+            schedules[res.resource_id] = intervals
+        return schedules
+
+    def _is_available(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        resources: List[str],
+        start: int,
+        end: int
+    ) -> bool:
+        for res_id in resources:
+            for occ_start, occ_end in schedules.get(res_id, []):
+                if not (end <= occ_start or start >= occ_end):
+                    return False
+        return True
+
+    def _reserve_interval(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        resources: List[str],
+        start: int,
+        end: int
+    ) -> None:
+        for res_id in resources:
+            schedules.setdefault(res_id, []).append((start, end))
+
+    def _find_earliest_start(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        resources: List[str],
+        earliest: int,
+        duration: int,
+        max_time: int
+    ) -> Optional[int]:
+        t = earliest
+        while t + duration <= max_time:
+            if self._is_available(schedules, resources, t, t + duration):
+                return t
+            t += 1
+        return None
+
+    def _find_earliest_start_in_windows(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        resources: List[str],
+        earliest: int,
+        duration: int,
+        windows: List[Tuple[int, int]],
+        max_time: int
+    ) -> Optional[int]:
+        for ws, we in sorted(windows):
+            t = max(earliest, ws)
+            while t + duration <= we and t + duration <= max_time:
+                if self._is_available(schedules, resources, t, t + duration):
+                    return t
+                t += 1
+        return None
+
+    def _block_available(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        op4: Operation,
+        op5: Operation,
+        op6: Operation,
+        start4: int
+    ) -> bool:
+        end4 = start4 + op4.duration
+        start5 = end4
+        end5 = start5 + op5.duration
+        start6 = end5
+        end6 = start6 + op6.duration
+
+        if not self._is_available(schedules, op4.resources, start4, end4):
+            return False
+        if not self._is_available(schedules, op5.resources, start5, end5):
+            return False
+        if not self._is_available(schedules, op6.resources, start6, end6):
+            return False
+        return True
+
+    def _find_block_start(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        earliest: int,
+        op4: Operation,
+        op5: Operation,
+        op6: Operation,
+        max_time: int
+    ) -> Optional[int]:
+        if not op6.time_windows:
+            return None
+        total_pre = op4.duration + op5.duration
+        for ws, we in sorted(op6.time_windows):
+            t6 = max(ws, earliest + total_pre)
+            while t6 + op6.duration <= we and t6 + op6.duration <= max_time:
+                start4 = t6 - total_pre
+                if self._block_available(schedules, op4, op5, op6, start4):
+                    return start4
+                t6 += 1
+        return None
     
     def _get_tasks_to_schedule(
         self,

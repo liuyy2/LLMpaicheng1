@@ -720,6 +720,7 @@ def _simulate_episode_v2_1(
             old_plan=old_plan,
             new_plan=state.current_plan,
             completed_ops=state.completed_ops,
+            missions=state.missions,
             horizon=horizon,
             solve_time_ms=result.solve_time_ms,
             is_feasible=is_feasible,
