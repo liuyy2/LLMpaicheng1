@@ -192,6 +192,31 @@ def ci95(values: List[float]) -> float:
     return 1.96 * std(values) / math.sqrt(len(values))
 
 
+def compute_epsilon_threshold(
+    records: List["EpisodeRecord"],
+    dataset: str,
+    epsilon_metric: str,
+    epsilon_relative: str,
+    epsilon_value: float,
+    baseline_policy: str = "fixed_default"
+) -> Optional[float]:
+    if epsilon_metric != "avg_delay":
+        raise ValueError(f"Unsupported epsilon_metric: {epsilon_metric}")
+    baseline_delays = [
+        r.avg_delay
+        for r in records
+        if r.dataset == dataset and r.policy_name == baseline_policy
+    ]
+    if not baseline_delays:
+        return None
+    baseline_delay = mean(baseline_delays)
+    if epsilon_relative == "baseline":
+        return baseline_delay * (1 + epsilon_value)
+    if epsilon_relative == "absolute":
+        return epsilon_value
+    raise ValueError(f"Unsupported epsilon_relative: {epsilon_relative}")
+
+
 def percentile(values: List[float], p: float) -> float:
     """计算百分位数"""
     if not values:
@@ -408,15 +433,14 @@ def plot_delay_vs_drift_scatter(
     records: List[EpisodeRecord],
     output_path: str,
     dataset: str = "test",
-    title: str = "Delay vs Plan Drift"
+    title: str = "Delay vs Plan Drift",
+    epsilon_threshold: Optional[float] = None
 ):
     """
     绘制 Delay vs PlanDrift 散点图
     
     每个策略不同颜色和标记
     """
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
     # 按策略分组
     policy_data: Dict[str, Tuple[List[float], List[float]]] = defaultdict(lambda: ([], []))
     
@@ -426,33 +450,74 @@ def plot_delay_vs_drift_scatter(
         policy_data[rec.policy_name][0].append(rec.avg_delay)
         policy_data[rec.policy_name][1].append(rec.episode_drift)
     
-    # 绘制每个策略
-    for policy_name, (delays, drifts) in policy_data.items():
-        style = get_policy_style(policy_name)
-        ax.scatter(
-            delays, drifts,
-            c=style["color"],
-            marker=style["marker"],
-            label=style["label"],
-            alpha=0.7,
-            s=60,
-            edgecolors='white',
-            linewidths=0.5
-        )
-    
-    ax.set_xlabel("Average Delay (slots)", fontsize=12)
-    ax.set_ylabel("Episode Plan Drift", fontsize=12)
-    ax.set_title(f"{title} ({dataset} set)", fontsize=14)
-    ax.legend(loc="upper right", fontsize=10)
-    ax.grid(True, alpha=0.3)
-    
-    # 添加参考线
-    ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    if epsilon_threshold is None:
+        fig, ax = plt.subplots(figsize=(10, 8))
+        # 绘制每个策略
+        for policy_name, (delays, drifts) in policy_data.items():
+            style = get_policy_style(policy_name)
+            ax.scatter(
+                delays, drifts,
+                c=style["color"],
+                marker=style["marker"],
+                label=style["label"],
+                alpha=0.7,
+                s=60,
+                edgecolors='white',
+                linewidths=0.5
+            )
+        ax.set_xlabel("Average Delay (slots)", fontsize=12)
+        ax.set_ylabel("Episode Plan Drift", fontsize=12)
+        ax.set_title(f"{title} ({dataset} set)", fontsize=14)
+        ax.legend(loc="upper right", fontsize=10)
+        ax.grid(True, alpha=0.3)
+        # 添加参考线
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+        panels = [("All", False), ("Feasible Only", True)]
+        for ax, (panel_title, feasible_only) in zip(axes, panels):
+            for policy_name, (delays, drifts) in policy_data.items():
+                style = get_policy_style(policy_name)
+                pts = [
+                    (d, dr)
+                    for d, dr in zip(delays, drifts)
+                    if (d <= epsilon_threshold or not feasible_only)
+                ]
+                if not pts:
+                    continue
+                xs, ys = zip(*pts)
+                ax.scatter(
+                    xs, ys,
+                    c=style["color"],
+                    marker=style["marker"],
+                    label=style["label"],
+                    alpha=0.7,
+                    s=50,
+                    edgecolors='white',
+                    linewidths=0.5
+                )
+            ax.set_xlabel("Average Delay (slots)", fontsize=11)
+            ax.set_title(f"{title} ({dataset} set) - {panel_title}", fontsize=12)
+            ax.grid(True, alpha=0.3)
+            ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+            ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+            ax.axvline(
+                x=epsilon_threshold,
+                color='black',
+                linestyle='--',
+                alpha=0.7,
+                label='epsilon threshold' if not feasible_only else None
+            )
+            ax.axvspan(0, epsilon_threshold, color='green', alpha=0.04)
+        axes[0].set_ylabel("Episode Plan Drift", fontsize=11)
+        axes[0].legend(loc="upper right", fontsize=9)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
     
     print(f"保存图表: {output_path}")
 
@@ -1403,7 +1468,10 @@ def run_analysis(
     input_dir: str,
     output_dir: str,
     show_plots: bool = False,
-    tuning_lambda: float = 5.0
+    tuning_lambda: float = 5.0,
+    epsilon_metric: str = "avg_delay",
+    epsilon_relative: str = "baseline",
+    epsilon_value: float = 0.10
 ):
     """
     运行完整分析流程
@@ -1438,6 +1506,21 @@ def run_analysis(
     
     primary_dataset = "test" if "test" in available_datasets else "train"
     print(f"主数据集: {primary_dataset}")
+
+    epsilon_threshold = compute_epsilon_threshold(
+        records,
+        primary_dataset,
+        epsilon_metric,
+        epsilon_relative,
+        epsilon_value
+    )
+    if epsilon_threshold is None:
+        print("Warning: fixed_default not found for epsilon threshold, skip constraint line")
+    else:
+        print(
+            f"Epsilon constraint: {epsilon_metric} <= {epsilon_threshold:.3f} "
+            f"({epsilon_relative}, value={epsilon_value})"
+        )
     
     # 2. 计算统计
     stats = compute_summary_stats(records, tuning_lambda)
@@ -1461,7 +1544,8 @@ def run_analysis(
     plot_delay_vs_drift_scatter(
         records,
         os.path.join(output_dir, "delay_vs_drift_scatter.png"),
-        dataset=primary_dataset
+        dataset=primary_dataset,
+        epsilon_threshold=epsilon_threshold
     )
     
     # 图表 2: 重排/切换次数分布
@@ -1634,6 +1718,20 @@ def main():
         help="综合目标中 drift 的权重 (default: 5.0)"
     )
     parser.add_argument(
+        "--epsilon-metric", type=str, default="avg_delay",
+        choices=["avg_delay"],
+        help="epsilon constraint metric (default: avg_delay)"
+    )
+    parser.add_argument(
+        "--epsilon-relative", type=str, default="baseline",
+        choices=["baseline", "absolute"],
+        help="epsilon threshold type: baseline or absolute (default: baseline)"
+    )
+    parser.add_argument(
+        "--epsilon-value", type=float, default=0.10,
+        help="baseline: relative tolerance (e.g. 0.10); absolute: threshold value"
+    )
+    parser.add_argument(
         "--show", action="store_true",
         help="显示图表窗口"
     )
@@ -1644,7 +1742,10 @@ def main():
         input_dir=args.input,
         output_dir=args.output,
         show_plots=args.show,
-        tuning_lambda=args.tuning_lambda
+        tuning_lambda=args.tuning_lambda,
+        epsilon_metric=args.epsilon_metric,
+        epsilon_relative=args.epsilon_relative,
+        epsilon_value=args.epsilon_value
     )
 
 

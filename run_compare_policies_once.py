@@ -66,12 +66,8 @@ def run_policy_comparison(
     scenario = generate_scenario(seed=seed, config=config)
     print("")
     print("Scenario generated:")
-    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
-        print(f"  - Missions: {len(scenario.missions)}")
-        print(f"  - Resources: {len(scenario.resources)}")
-    else:
-        print(f"  - Tasks: {len(scenario.tasks)}")
-        print(f"  - Pads: {len(scenario.pads)}")
+    print(f"  - Missions: {len(scenario.missions)}")
+    print(f"  - Resources: {len(scenario.resources)}")
     print(f"  - Disturbance events: {len(scenario.disturbance_timeline)}")
 
     # 2. 定义策略
@@ -165,7 +161,7 @@ def run_policy_comparison(
             # 创建空结果
             results.append(PolicyComparisonResult(
                 policy_name=policy.name,
-                completed=0, total=len(scenario.missions) if getattr(scenario, 'schema_version', 'v1') == 'v2_1' else len(scenario.tasks),
+                completed=0, total=len(scenario.missions),
                 on_time_rate=0.0, avg_delay=float('inf'),
                 max_delay=0, episode_drift=0.0,
                 total_shifts=0, total_switches=0,

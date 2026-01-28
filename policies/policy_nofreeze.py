@@ -9,12 +9,10 @@
 Baseline B2：用于对比冻结机制的效果
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 from policies.base import BasePolicy, MetaParams
-from disturbance import SimulationState
 from config import Config
-from solver_cpsat import Plan
 
 
 class NoFreezePolicy(BasePolicy):
@@ -78,7 +76,7 @@ class NoFreezePolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
     ) -> Tuple[MetaParams, None]:
@@ -143,7 +141,7 @@ class MinimalFreezePolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
     ) -> Tuple[MetaParams, None]:

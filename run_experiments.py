@@ -80,10 +80,10 @@ class ExperimentConfig:
     disturbance_levels: List[str] = field(default_factory=lambda: ["light", "medium", "heavy"])
     
     # 调参网格（扩展上界，保持4×4×4×4=256组合）
-    freeze_horizon_hours: List[float] = field(default_factory=lambda: [4, 8, 12, 16])  # 增加上界到16小时
+    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 4, 8, 16])  # 增加上界到16小时
     w_delay_values: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0, 30.0])  # 增加上界到30
-    w_shift_values: List[float] = field(default_factory=lambda: [0.4, 0.8, 1.2, 2.0])  # 增加上界到2.0
-    w_switch_values: List[float] = field(default_factory=lambda: [10, 30, 60, 100])  # 增加上界到100
+    w_shift_values: List[float] = field(default_factory=lambda: [0.0, 1.0, 3.0, 8.0])  # 增加上界到2.0
+    w_switch_values: List[float] = field(default_factory=lambda: [60, 120, 180, 240])  # 增加上界到100
     trigger_window_loss_pct: List[float] = field(default_factory=lambda: [0.1, 0.25, 0.4])
     
     # 综合目标权重（软约束）
@@ -100,6 +100,11 @@ class ExperimentConfig:
     
     # 并行处理
     max_workers: int = 1  # 并行进程数（1为串行，设置>1启用并行）
+
+    # ========== ε-constraint（稳定性约束） ==========
+    epsilon_metric: str = "avg_delay"  # 目前仅支持 avg_delay
+    epsilon_relative: str = "baseline"  # "baseline" | "absolute"
+    epsilon_value: float = 0.10  # baseline: 相对阈值(10%); absolute: 绝对阈值
     
     # 输出目录
     output_dir: str = "results"
@@ -225,6 +230,13 @@ class TuningResult:
     delay_ok: bool
     feasible_ok: bool
     combined_score: float  # normalized weighted score
+
+    # ε-constraint 结果
+    epsilon_metric: str
+    epsilon_threshold: float
+    epsilon_value: float
+    epsilon_ok: bool
+    epsilon_violation: float
     
     # 统计
     num_episodes: int
@@ -626,7 +638,7 @@ def grid_search_tuning(
     verbose: bool = True
 ) -> Tuple[Dict[str, Any], List[TuningResult]]:
     """
-    Grid search on train set with normalized multi-metric score.
+    Grid search on train set with epsilon-constraint and min drift.
     """
     if verbose:
         print("\n" + "="*70)
@@ -740,6 +752,16 @@ def grid_search_tuning(
     base_forced = max(eps, baseline_fixed["avg_forced_replan_rate"])
     base_feasible = baseline_fixed["avg_feasible_rate"]
 
+    if exp_config.epsilon_metric != "avg_delay":
+        raise ValueError(f"Unsupported epsilon_metric: {exp_config.epsilon_metric}")
+
+    if exp_config.epsilon_relative == "baseline":
+        epsilon_threshold = base_delay * (1 + exp_config.epsilon_value)
+    elif exp_config.epsilon_relative == "absolute":
+        epsilon_threshold = exp_config.epsilon_value
+    else:
+        raise ValueError(f"Unsupported epsilon_relative: {exp_config.epsilon_relative}")
+
     w_delay = exp_config.tuning_weight_delay
     w_drift = exp_config.tuning_weight_drift
     w_time = exp_config.tuning_weight_time_dev
@@ -754,10 +776,15 @@ def grid_search_tuning(
         print("Baseline thresholds:")
         print(f"  delay<= {base_delay * (1 + exp_config.tuning_delay_tolerance):.3f} (tol={exp_config.tuning_delay_tolerance*100:.1f}%)")
         print(f"  feasible>= {base_feasible:.3f}")
+        print("Epsilon-constraint:")
+        print(f"  metric={exp_config.epsilon_metric}, threshold={epsilon_threshold:.3f} ({exp_config.epsilon_relative}, value={exp_config.epsilon_value})")
 
     tuning_results: List[TuningResult] = []
-    best_score = float('inf')
     best_params = None
+    best_drift = float('inf')
+    best_violation = float('inf')
+    best_delay = float('inf')
+    feasible_found = False
 
     total_combos = len(param_grid)
 
@@ -796,6 +823,10 @@ def grid_search_tuning(
         delay_ok = stats["avg_delay"] <= base_delay * (1 + exp_config.tuning_delay_tolerance)
         feasible_ok = stats["avg_feasible_rate"] >= base_feasible - 1e-9
 
+        epsilon_value = stats["avg_delay"]
+        epsilon_ok = epsilon_value <= epsilon_threshold
+        epsilon_violation = max(0.0, epsilon_value - epsilon_threshold)
+
         result = TuningResult(
             freeze_horizon_slots=freeze_h,
             w_delay=w_d,
@@ -813,6 +844,11 @@ def grid_search_tuning(
             delay_ok=delay_ok,
             feasible_ok=feasible_ok,
             combined_score=combined,
+            epsilon_metric=exp_config.epsilon_metric,
+            epsilon_threshold=epsilon_threshold,
+            epsilon_value=epsilon_value,
+            epsilon_ok=epsilon_ok,
+            epsilon_violation=epsilon_violation,
             num_episodes=len(train_assignments),
             avg_solve_time_ms=stats["avg_solve_time_ms"]
         )
@@ -822,21 +858,52 @@ def grid_search_tuning(
             print(
                 f"  delay={stats['avg_delay']:.3f}, drift={stats['avg_drift']:.5f}, "
                 f"time_dev={stats['avg_time_deviation_min']:.3f}, forced={stats['avg_forced_replan_rate']:.3f}, "
-                f"feasible={stats['avg_feasible_rate']:.3f}, combined={combined:.4f}, ok={delay_ok and feasible_ok}"
+                f"feasible={stats['avg_feasible_rate']:.3f}, combined={combined:.4f}, eps_ok={epsilon_ok}"
             )
 
-        if combined < best_score:
-            best_score = combined
-            best_params = {
-                "w_delay": w_d,
-                "w_shift": w_s,
-                "w_switch": w_sw,
-                "freeze_horizon": freeze_h
-            }
+        if epsilon_ok:
+            feasible_found = True
+            if (stats["avg_drift"] < best_drift) or (
+                stats["avg_drift"] == best_drift and stats["avg_delay"] < best_delay
+            ):
+                best_drift = stats["avg_drift"]
+                best_delay = stats["avg_delay"]
+                best_params = {
+                    "w_delay": w_d,
+                    "w_shift": w_s,
+                    "w_switch": w_sw,
+                    "freeze_horizon": freeze_h,
+                    "epsilon_metric": exp_config.epsilon_metric,
+                    "epsilon_relative": exp_config.epsilon_relative,
+                    "epsilon_value": exp_config.epsilon_value,
+                    "epsilon_threshold": epsilon_threshold,
+                    "baseline_avg_delay": base_delay
+                }
+        elif not feasible_found:
+            if (epsilon_violation < best_violation) or (
+                epsilon_violation == best_violation and stats["avg_drift"] < best_drift
+            ):
+                best_violation = epsilon_violation
+                best_drift = stats["avg_drift"]
+                best_delay = stats["avg_delay"]
+                best_params = {
+                    "w_delay": w_d,
+                    "w_shift": w_s,
+                    "w_switch": w_sw,
+                    "freeze_horizon": freeze_h,
+                    "epsilon_metric": exp_config.epsilon_metric,
+                    "epsilon_relative": exp_config.epsilon_relative,
+                    "epsilon_value": exp_config.epsilon_value,
+                    "epsilon_threshold": epsilon_threshold,
+                    "baseline_avg_delay": base_delay
+                }
 
     if verbose:
         print(f"\nBest params: {best_params}")
-        print(f"Best score: {best_score:.4f}")
+        if feasible_found:
+            print(f"Best drift (feasible): {best_drift:.5f}")
+        else:
+            print(f"WARNING: no feasible params, best violation={best_violation:.3f}, drift={best_drift:.5f}")
         
         # 边界检查警告
         slot_minutes = DEFAULT_CONFIG.slot_minutes
@@ -1076,6 +1143,8 @@ def save_tuning_results(results: List[TuningResult], filepath: str):
         "avg_forced_replan_rate", "avg_feasible_rate",
         "delay_ratio", "drift_ratio", "time_dev_ratio", "forced_replan_ratio",
         "delay_ok", "feasible_ok", "combined_score",
+        "epsilon_metric", "epsilon_threshold", "epsilon_value",
+        "epsilon_ok", "epsilon_violation",
         "num_episodes", "avg_solve_time_ms"
     ]
     
@@ -1091,7 +1160,10 @@ def save_tuning_results(results: List[TuningResult], filepath: str):
 def save_summary(
     records: List[EpisodeMetricsRecord],
     filepath: str,
-    tuning_lambda: float = 5.0
+    tuning_lambda: float = 5.0,
+    epsilon_metric: str = "avg_delay",
+    epsilon_relative: str = "baseline",
+    epsilon_value: float = 0.10
 ):
     """Compute and save summary statistics."""
     import math
@@ -1122,6 +1194,17 @@ def save_summary(
 
     rows = []
     for (dataset, policy_name), recs in sorted(groups.items()):
+        baseline_recs = groups.get((dataset, "fixed_default"), [])
+        baseline_delay = mean([r.avg_delay for r in baseline_recs]) if baseline_recs else 0.0
+        if epsilon_metric != "avg_delay":
+            raise ValueError(f"Unsupported epsilon_metric: {epsilon_metric}")
+        if epsilon_relative == "baseline":
+            epsilon_threshold = baseline_delay * (1 + epsilon_value)
+        elif epsilon_relative == "absolute":
+            epsilon_threshold = epsilon_value
+        else:
+            raise ValueError(f"Unsupported epsilon_relative: {epsilon_relative}")
+
         delays = [r.avg_delay for r in recs]
         drifts = [r.episode_drift for r in recs]
         on_times = [r.on_time_rate for r in recs]
@@ -1176,7 +1259,15 @@ def save_summary(
             "llm_calls_mean": round(mean(llm_calls), 1),
             "llm_tokens_mean": round(mean(llm_tokens), 0),
             "llm_fallback_mean": round(mean(llm_fallbacks), 2),
-            "llm_cache_hit_rate_mean": round(mean(llm_cache_hits), 4)
+            "llm_cache_hit_rate_mean": round(mean(llm_cache_hits), 4),
+            "epsilon_metric": epsilon_metric,
+            "epsilon_threshold": round(epsilon_threshold, 3),
+            "epsilon_ok_rate": round(
+                mean([1.0 if d <= epsilon_threshold else 0.0 for d in delays]), 4
+            ),
+            "epsilon_violation_mean": round(
+                mean([max(0.0, d - epsilon_threshold) for d in delays]), 3
+            )
         }
         rows.append(row)
 
@@ -1317,7 +1408,14 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     save_episode_results(all_records, episode_path)
     
     summary_path = os.path.join(exp_config.output_dir, "summary.csv")
-    save_summary(all_records, summary_path, exp_config.tuning_lambda)
+    save_summary(
+        all_records,
+        summary_path,
+        exp_config.tuning_lambda,
+        exp_config.epsilon_metric,
+        exp_config.epsilon_relative,
+        exp_config.epsilon_value
+    )
     
     # 完成
     elapsed = time.time() - start_time
@@ -1397,7 +1495,14 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
     save_episode_results(train_records, episode_path)
     
     summary_path = os.path.join(exp_config.output_dir, "summary.csv")
-    save_summary(train_records, summary_path, exp_config.tuning_lambda)
+    save_summary(
+        train_records,
+        summary_path,
+        exp_config.tuning_lambda,
+        exp_config.epsilon_metric,
+        exp_config.epsilon_relative,
+        exp_config.epsilon_value
+    )
     
     # 完成
     elapsed = time.time() - start_time
@@ -1528,7 +1633,14 @@ def run_test_only(
     save_episode_results(all_records, episode_path)
     
     summary_path = os.path.join(exp_config.output_dir, "summary.csv")
-    save_summary(all_records, summary_path, exp_config.tuning_lambda)
+    save_summary(
+        all_records,
+        summary_path,
+        exp_config.tuning_lambda,
+        exp_config.epsilon_metric,
+        exp_config.epsilon_relative,
+        exp_config.epsilon_value
+    )
     
     # 完成
     elapsed = time.time() - start_time
@@ -1642,6 +1754,20 @@ def main():
         help="drift weight in combined score (default: 5.0)"
     )
     parser.add_argument(
+        "--epsilon-metric", type=str, default="avg_delay",
+        choices=["avg_delay"],
+        help="epsilon constraint metric (default: avg_delay)"
+    )
+    parser.add_argument(
+        "--epsilon-relative", type=str, default="baseline",
+        choices=["baseline", "absolute"],
+        help="epsilon threshold type: baseline or absolute (default: baseline)"
+    )
+    parser.add_argument(
+        "--epsilon-value", type=float, default=0.10,
+        help="baseline: relative tolerance (e.g. 0.10); absolute: threshold value"
+    )
+    parser.add_argument(
         "--quick", action="store_true",
         help="快速测试模式 (train=9, test=9, 减少调参组合)"
     )
@@ -1731,6 +1857,9 @@ def main():
         solver_timeout_s=args.solver_timeout,
         tuning_lambda=args.tuning_lambda,
         max_workers=args.workers,
+        epsilon_metric=args.epsilon_metric,
+        epsilon_relative=args.epsilon_relative,
+        epsilon_value=args.epsilon_value,
         # LLM 参数
         llm_base_url=args.llm_base_url,
         llm_model=args.llm_model,

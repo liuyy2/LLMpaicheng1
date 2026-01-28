@@ -29,40 +29,25 @@ except ImportError:
     HAS_LLM_CLIENT = False
 
 from policies.base import BasePolicy, MetaParams
-from disturbance import SimulationState
 from config import Config
-from solver_cpsat import Plan
-from features import compute_state_features, compute_state_features_ops, StateFeatures
+from features import compute_state_features_ops, StateFeatures
 
 
 def _compute_state_features_for_policy(
-    state: SimulationState,
+    state: Any,
     now: int,
     config: Config,
     prev_window_slots: Optional[Dict[str, Set[int]]],
     recent_shifts: int,
     recent_switches: int
 ) -> Tuple[StateFeatures, Dict[str, Set[int]]]:
-    if hasattr(state, 'missions') and hasattr(state, 'resources'):
-        return compute_state_features_ops(
-            missions=state.missions,
-            resources=state.resources,
-            current_plan=state.current_plan,
-            now=now,
-            config=config,
-            completed_ops=getattr(state, 'completed_ops', set()),
-            prev_window_slots=prev_window_slots,
-            recent_shifts=recent_shifts,
-            recent_switches=recent_switches
-        )
-
-    return compute_state_features(
-        tasks=state.tasks,
-        pads=state.pads,
+    return compute_state_features_ops(
+        missions=state.missions,
+        resources=state.resources,
         current_plan=state.current_plan,
         now=now,
         config=config,
-        completed_tasks=state.completed_tasks,
+        completed_ops=getattr(state, 'completed_ops', set()),
         prev_window_slots=prev_window_slots,
         recent_shifts=recent_shifts,
         recent_switches=recent_switches
@@ -594,7 +579,7 @@ class MockLLMPolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
     ) -> Tuple[MetaParams, None]:
@@ -824,7 +809,7 @@ class RealLLMPolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
     ) -> Tuple[MetaParams, None]:

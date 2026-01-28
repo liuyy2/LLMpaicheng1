@@ -307,7 +307,7 @@ def compute_plan_drift_ops(
     alpha: float = 0.7,
     beta: float = 0.3
 ) -> Tuple[float, int, int, float]:
-    if old_plan is None:
+        if old_plan is None:
         return 0.0, 0, 0, 0.0
 
     old_op_ids = {a.op_id for a in old_plan.op_assignments}
@@ -366,7 +366,7 @@ def compute_rolling_metrics_ops(
     alpha: float = 0.7,
     beta: float = 0.3
 ) -> RollingMetrics:
-    plan_drift, num_shifts, num_switches, avg_time_shift_slots = compute_plan_drift_ops(
+        plan_drift, num_shifts, num_switches, avg_time_shift_slots = compute_plan_drift_ops(
         old_plan, new_plan, completed_ops, missions, horizon, alpha, beta
     )
 

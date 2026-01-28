@@ -9,7 +9,7 @@ from typing import Tuple, List
 @dataclass
 class Config:
     """全局配置"""
-    schema_version: str = "v2_1"             # "v1" | "v2_1"
+    schema_version: str = "v2_1"             # V2.5 (v2_1) only
     # 时间离散化
     slot_minutes: int = 15                   # 15分钟/格 (比10分钟更整洁，比30分钟更精确)
     rolling_interval: int = 12                # 12 * 15m = 180m = 3小时 (符合"半个班次"的决策频率)

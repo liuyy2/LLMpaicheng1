@@ -4,14 +4,13 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 # 避免循环导入，使用字符串类型提示
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from disturbance import SimulationState
     from config import Config
-    from solver_cpsat import Plan
+    from solver_cpsat import PlanV2_1
 
 
 @dataclass
@@ -39,10 +38,10 @@ class BasePolicy(ABC):
     @abstractmethod
     def decide(
         self,
-        state: "SimulationState",
+        state: Any,
         now: int,
         config: "Config"
-    ) -> Tuple[Optional[MetaParams], Optional["Plan"]]:
+    ) -> Tuple[Optional[MetaParams], Optional["PlanV2_1"]]:
         """
         策略决策
         

@@ -64,12 +64,8 @@ def print_scenario_info(scenario):
     print(" Scenario Information")
     print("-" * 50)
     print(f"  Seed:           {scenario.seed}")
-    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
-        print(f"  Missions:       {len(scenario.missions)}")
-        print(f"  Resources:      {len(scenario.resources)}")
-    else:
-        print(f"  Tasks:          {len(scenario.tasks)}")
-        print(f"  Pads:           {len(scenario.pads)}")
+    print(f"  Missions:       {len(scenario.missions)}")
+    print(f"  Resources:      {len(scenario.resources)}")
     print(f"  Disturbances:   {len(scenario.disturbance_timeline)}")
 
     event_counts = {}
@@ -149,7 +145,7 @@ def print_schedule(result, max_show=10):
         print(f"  {'-'*40}")
         for i, a in enumerate(sorted_schedule):
             if i >= max_show:
-                print(f"  ... and {len(sorted_schedule) - max_show} more tasks")
+                print(f"  ... and {len(sorted_schedule) - max_show} more ops")
                 break
             print(f"  {a.task_id:<10} {a.pad_id:<10} {a.start_slot:<10} {a.launch_slot:<10}")
 

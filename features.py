@@ -754,24 +754,15 @@ if __name__ == "__main__":
     print("=== Features Module Test ===\n")
     
     scenario = generate_scenario(seed=42)
+    features, window_slots = compute_state_features_ops(
+        missions=scenario.missions,
+        resources=scenario.resources,
+        current_plan=None,
+        now=0,
+        config=DEFAULT_CONFIG,
+        completed_ops=set()
+    )
 
-    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
-        features, window_slots = compute_state_features_ops(
-            missions=scenario.missions,
-            resources=scenario.resources,
-            current_plan=None,
-            now=0,
-            config=DEFAULT_CONFIG
-        )
-    else:
-        features, window_slots = compute_state_features(
-            tasks=scenario.tasks,
-            pads=scenario.pads,
-            current_plan=None,
-            now=0,
-            config=DEFAULT_CONFIG
-        )
-    
-    print("Initial features:")
+print("Initial features:")
     for key, value in features.to_dict().items():
         print(f"  {key}: {value}")

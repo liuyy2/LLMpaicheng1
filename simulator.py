@@ -14,43 +14,23 @@ from typing import List, Dict, Set, Optional, Tuple, Any
 
 from config import Config, DEFAULT_CONFIG
 from solver_cpsat import (
-    Task, Pad, Plan, TaskAssignment,
     Mission, Operation, Resource, PlanV2_1, OpAssignment,
     SolverResult, SolveStatus,
-    solve, compute_frozen_tasks,
     solve_v2_1, compute_frozen_ops, SolverConfigV2_1
 )
 from scenario import Scenario, DisturbanceEvent
-from disturbance import (
-    SimulationState, 
-    apply_disturbance, 
-    update_task_status,
-    get_frozen_assignments,
-    check_plan_feasibility,
-    create_initial_state
-)
 from metrics import (
     RollingMetrics, EpisodeMetrics,
-    compute_rolling_metrics, compute_episode_metrics,
     compute_rolling_metrics_ops, compute_episode_metrics_ops,
     metrics_to_dict, rolling_metrics_to_dict
 )
-from features import compute_state_features, compute_state_features_ops
+from features import compute_state_features_ops
 from policies.base import BasePolicy, MetaParams
 
 
 
 
 def assignment_to_dict(assign: Any) -> Dict[str, Any]:
-    if hasattr(assign, 'task_id'):
-        return {
-            'task_id': assign.task_id,
-            'pad_id': assign.pad_id,
-            'start_slot': assign.start_slot,
-            'launch_slot': assign.launch_slot,
-            'end_slot': assign.end_slot
-        }
-
     if hasattr(assign, 'op_id'):
         return {
             'op_id': assign.op_id,
@@ -376,220 +356,7 @@ def simulate_episode(
     config: Config = DEFAULT_CONFIG,
     verbose: bool = False
 ) -> EpisodeResult:
-    if getattr(scenario, 'schema_version', 'v1') == 'v2_1':
-        return _simulate_episode_v2_1(policy, scenario, config, verbose)
-    return _simulate_episode_v1(policy, scenario, config, verbose)
-
-
-def _simulate_episode_v1(
-    policy: BasePolicy,
-    scenario: Scenario,
-    config: Config = DEFAULT_CONFIG,
-    verbose: bool = False
-) -> EpisodeResult:
-    start_time = time.time()
-
-    policy.reset()
-
-    state = create_initial_state(scenario.tasks, scenario.pads)
-
-    snapshots: List[RollingSnapshot] = []
-    rolling_metrics_list: List[RollingMetrics] = []
-    prev_window_slots = None
-    feature_history = []
-
-    executed_assignments: Dict[str, TaskAssignment] = {}
-
-    sim_total = config.sim_total_slots
-    rolling_interval = config.rolling_interval
-    horizon = config.horizon_slots
-
-    now = 0
-    last_now = 0
-
-    if verbose:
-        print("\n" + "=" * 60)
-        print(f" Episode Simulation: seed={scenario.seed}, policy={policy.name}")
-        print(f" Total slots: {sim_total}, Rolling interval: {rolling_interval}")
-        print("=" * 60)
-
-    while now < sim_total:
-        if verbose:
-            print(f"\n--- Rolling at t={now} ---")
-
-        state = apply_disturbance(state, now, scenario.disturbance_timeline, last_now)
-
-        state = update_task_status(state, now)
-        state.now = now
-
-        if state.current_plan:
-            for assign in state.current_plan.assignments:
-                if assign.task_id in state.completed_tasks and assign.task_id not in executed_assignments:
-                    executed_assignments[assign.task_id] = assign
-
-        is_feasible, infeasible_reasons = check_plan_feasibility(state, now)
-        forced_replan = not is_feasible
-
-        if verbose and forced_replan:
-            print(f"  Plan infeasible: {infeasible_reasons[:2]}")
-
-        meta_params, direct_plan = policy.decide(state, now, config)
-
-        if meta_params:
-            freeze_h = meta_params.freeze_horizon if meta_params.freeze_horizon is not None else config.freeze_horizon
-            weights = meta_params.to_weights()
-        else:
-            freeze_h = config.freeze_horizon
-            weights = (config.default_w_delay, config.default_w_shift, config.default_w_switch)
-
-        horizon_end = now + horizon
-        tasks_to_schedule = state.get_schedulable_tasks(horizon_end)
-
-        if state.current_plan:
-            for assign in state.current_plan.assignments:
-                if assign.task_id in state.started_tasks and assign.task_id not in state.completed_tasks:
-                    task = state.get_task(assign.task_id)
-                    if task and task not in tasks_to_schedule:
-                        tasks_to_schedule.append(task)
-
-        if direct_plan:
-            result = SolverResult(
-                status=SolveStatus.OPTIMAL,
-                plan=direct_plan,
-                objective_value=0.0,
-                solve_time_ms=0
-            )
-        else:
-            result = solve(
-                now=now,
-                tasks=tasks_to_schedule,
-                pads=state.pads,
-                prev_plan=state.current_plan,
-                freeze_horizon=freeze_h,
-                weights=weights,
-                time_limit=config.solver_timeout_s,
-                completed_tasks=state.completed_tasks
-            )
-
-        old_plan = state.current_plan
-
-        if result.status in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
-            state.current_plan = result.plan
-            if state.current_plan:
-                state.current_plan.timestamp = now
-            solve_status = result.status
-        else:
-            if verbose:
-                print(f"  Solver returned {result.status}, keeping old plan")
-            solve_status = result.status
-
-        frozen_count = len(get_frozen_assignments(state, now, freeze_h))
-
-        rolling_m = compute_rolling_metrics(
-            t=now,
-            old_plan=old_plan,
-            new_plan=state.current_plan,
-            completed_tasks=state.completed_tasks,
-            horizon=horizon,
-            solve_time_ms=result.solve_time_ms,
-            is_feasible=is_feasible,
-            forced_replan=forced_replan,
-            frozen_count=frozen_count,
-            alpha=config.drift_alpha,
-            beta=config.drift_beta
-        )
-
-        rolling_metrics_list.append(rolling_m)
-
-        state_features = None
-        try:
-            features, prev_window_slots = compute_state_features(
-                tasks=state.tasks,
-                pads=state.pads,
-                current_plan=state.current_plan,
-                now=now,
-                config=config,
-                completed_tasks=state.completed_tasks,
-                prev_window_slots=prev_window_slots,
-                recent_shifts=rolling_m.num_shifts,
-                recent_switches=rolling_m.num_switches,
-                history=feature_history
-            )
-            state_features = features.to_dict()
-            feature_history.append(features)
-        except Exception:
-            state_features = None
-
-        snapshot = RollingSnapshot(
-            t=now,
-            plan=copy.deepcopy(state.current_plan),
-            solve_status=solve_status,
-            solve_time_ms=result.solve_time_ms,
-            metrics=rolling_m,
-            meta_params=meta_params,
-            infeasible_reasons=infeasible_reasons if forced_replan else [],
-            state_features=state_features
-        )
-        snapshots.append(snapshot)
-
-        if verbose:
-            print(f"  Status: {solve_status.value}, Time: {result.solve_time_ms}ms")
-            print(f"  Tasks scheduled: {rolling_m.num_tasks_scheduled}, Frozen: {rolling_m.num_frozen}")
-            print(f"  Drift: {rolling_m.plan_drift:.4f}, Shifts: {rolling_m.num_shifts}, Switches: {rolling_m.num_switches}")
-            print(f"  Completed: {len(state.completed_tasks)}/{len(state.tasks)}")
-
-        last_now = now
-        now += rolling_interval
-
-        if len(state.completed_tasks) >= len(state.tasks):
-            if verbose:
-                print(f"\nAll tasks completed at t={now}")
-            break
-
-    final_schedule = list(executed_assignments.values())
-    if state.current_plan:
-        for assign in state.current_plan.assignments:
-            if assign.task_id not in executed_assignments:
-                final_schedule.append(assign)
-
-    episode_metrics = compute_episode_metrics(
-        rolling_metrics_list=rolling_metrics_list,
-        final_assignments=final_schedule,
-        tasks=scenario.tasks,
-        completed_task_ids=state.completed_tasks,
-        pad_count=len(scenario.pads),
-        horizon_slots=sim_total,
-        slot_minutes=config.slot_minutes
-    )
-
-    total_runtime = time.time() - start_time
-
-    all_task_ids = {t.task_id for t in scenario.tasks}
-    uncompleted = all_task_ids - state.completed_tasks
-
-    result = EpisodeResult(
-        seed=scenario.seed,
-        policy_name=policy.name,
-        snapshots=snapshots,
-        metrics=episode_metrics,
-        final_schedule=final_schedule,
-        completed_tasks=state.completed_tasks,
-        uncompleted_tasks=uncompleted,
-        total_runtime_s=total_runtime
-    )
-
-    if verbose:
-        print("\n" + "=" * 60)
-        print(" Episode Complete")
-        print("=" * 60)
-        print(f"  Runtime: {total_runtime:.2f}s")
-        print(f"  Completed: {episode_metrics.num_completed}/{episode_metrics.num_total}")
-        print(f"  On-time rate: {episode_metrics.on_time_rate:.2%}")
-        print(f"  Episode drift: {episode_metrics.episode_drift:.4f}")
-        print(f"  Total shifts: {episode_metrics.total_shifts}")
-        print(f"  Total switches: {episode_metrics.total_switches}")
-
-    return result
+    return _simulate_episode_v2_1(policy, scenario, config, verbose)
 
 
 def _simulate_episode_v2_1(
@@ -607,6 +374,7 @@ def _simulate_episode_v2_1(
     snapshots: List[RollingSnapshot] = []
     rolling_metrics_list: List[RollingMetrics] = []
     feature_history = []
+    prev_window_slots = None
 
     executed_assignments: Dict[str, OpAssignment] = {}
 
@@ -884,7 +652,7 @@ def save_episode_logs(
         json.dump({
             "seed": result.seed,
             "policy": result.policy_name,
-            "schema_version": scenario.schema_version if scenario else "v1",
+            "schema_version": scenario.schema_version if scenario else "v2_1",
             "schedule": [assignment_to_dict(a) for a in result.final_schedule],
             "completed": list(result.completed_tasks),
             "uncompleted": list(result.uncompleted_tasks)
@@ -919,7 +687,7 @@ if __name__ == "__main__":
     
     # 生成场景
     scenario = generate_scenario(seed=42)
-    print(f"Generated scenario: {len(scenario.tasks)} tasks, "
+    print(f"Generated scenario: {len(scenario.missions)} missions, "
           f"{len(scenario.disturbance_timeline)} disturbances")
     
     # 创建策略

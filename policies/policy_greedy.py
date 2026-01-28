@@ -14,7 +14,6 @@ from typing import Optional, Tuple, List, Dict, Set, Any
 from dataclasses import dataclass
 
 from policies.base import BasePolicy, MetaParams
-from disturbance import SimulationState
 from config import Config
 from solver_cpsat import (
     Task, Pad, Plan, TaskAssignment,
@@ -136,70 +135,25 @@ class GreedyPolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
-    ) -> Tuple[Optional[MetaParams], Optional[Plan]]:
+    ) -> Tuple[Optional[MetaParams], Optional[PlanV2_1]]:
         """
-        直接生成贪心计划
+        ????????
         
         Returns:
-            (None, Plan) - 第一项为 None 表示不使用 CP-SAT
+            (None, Plan) - ???? None ????? CP-SAT
         """
         self._call_count += 1
-        if hasattr(state, 'missions') and hasattr(state, 'resources'):
-            plan = self._greedy_plan_ops(state, now, config)
-            return None, plan
+        if not (hasattr(state, 'missions') and hasattr(state, 'resources')):
+            raise ValueError("GreedyPolicy only supports V2.1 (missions/resources) scenarios.")
 
-        
-        # 获取需要排程的任务
-        horizon_end = now + config.horizon_slots
-        tasks_to_schedule = self._get_tasks_to_schedule(state, now, horizon_end)
-        
-        if not tasks_to_schedule:
-            return None, Plan(timestamp=now, assignments=[])
-        
-        # 初始化每个 pad 的占用情况
-        pad_schedules: Dict[str, PadSchedule] = {}
-        for pad in state.pads:
-            pad_schedules[pad.pad_id] = PadSchedule(pad_id=pad.pad_id, occupied_intervals=[])
-        
-        # 添加已开始任务的占用
-        if state.current_plan:
-            for assign in state.current_plan.assignments:
-                if assign.task_id in state.started_tasks and assign.task_id not in state.completed_tasks:
-                    pad_schedules[assign.pad_id].add_occupation(assign.start_slot, assign.launch_slot)
-        
-        # 排序任务
-        sorted_tasks = self._sort_tasks(tasks_to_schedule)
-        
-        # 贪心分配
-        assignments: List[TaskAssignment] = []
-        
-        for task in sorted_tasks:
-            best_assignment = self._find_best_assignment(
-                task, pad_schedules, state.pads, now, state.current_plan
-            )
-            
-            if best_assignment:
-                assignments.append(best_assignment)
-                pad_schedules[best_assignment.pad_id].add_occupation(
-                    best_assignment.start_slot, best_assignment.launch_slot
-                )
-                self._total_tasks_scheduled += 1
-        
-        # 添加已开始但未完成的任务（保持不变）
-        if state.current_plan:
-            for assign in state.current_plan.assignments:
-                if assign.task_id in state.started_tasks and assign.task_id not in state.completed_tasks:
-                    # 检查是否已在 assignments 中
-                    if not any(a.task_id == assign.task_id for a in assignments):
-                        assignments.append(assign)
-        
-        plan = Plan(timestamp=now, assignments=assignments)
+        plan = self._greedy_plan_ops(state, now, config)
         return None, plan
 
-    def _greedy_plan_ops(
+
+def _greedy_plan_ops(
         self,
         state: Any,
         now: int,
@@ -212,6 +166,10 @@ class GreedyPolicy(BasePolicy):
         if not missions:
             return PlanV2_1(timestamp=now, op_assignments=[])
 
+        op5_max_wait_slots = max(
+            0,
+            int(round(config.op5_max_wait_hours * 60 / config.slot_minutes))
+        )
         resource_schedules = self._init_resource_schedules(state)
         assignments: List[OpAssignment] = []
         fixed_end: Dict[str, int] = {}
@@ -245,19 +203,20 @@ class GreedyPolicy(BasePolicy):
                     op5 = ops_by_idx[5]
                     op6 = ops_by_idx[6]
                     if op5.op_id not in fixed_end and op6.op_id not in fixed_end:
-                        start4 = self._find_block_start(
+                        block = self._find_block_start(
                             resource_schedules,
                             earliest,
                             op,
                             op5,
                             op6,
-                            config.sim_total_slots
+                            config.sim_total_slots,
+                            op5_max_wait_slots
                         )
-                        if start4 is not None:
+                        if block is not None:
+                            start4, start6 = block
                             end4 = start4 + op.duration
                             start5 = end4
-                            end5 = start5 + op5.duration
-                            start6 = end5
+                            end5 = start6
                             end6 = start6 + op6.duration
                             assignments.append(OpAssignment(
                                 op_id=op.op_id,
@@ -291,6 +250,8 @@ class GreedyPolicy(BasePolicy):
                             self._reserve_interval(resource_schedules, op6.resources, start6, end6)
                             prev_end = end6
                             continue
+                        else:
+                            break
 
                 if op_index == 6 and op.time_windows:
                     start = self._find_earliest_start_in_windows(
@@ -398,14 +359,16 @@ class GreedyPolicy(BasePolicy):
         op4: Operation,
         op5: Operation,
         op6: Operation,
-        start4: int
+        start4: int,
+        start6: int
     ) -> bool:
         end4 = start4 + op4.duration
         start5 = end4
-        end5 = start5 + op5.duration
-        start6 = end5
+        end5 = start6
         end6 = start6 + op6.duration
 
+        if end5 < start5:
+            return False
         if not self._is_available(schedules, op4.resources, start4, end4):
             return False
         if not self._is_available(schedules, op5.resources, start5, end5):
@@ -421,23 +384,35 @@ class GreedyPolicy(BasePolicy):
         op4: Operation,
         op5: Operation,
         op6: Operation,
-        max_time: int
-    ) -> Optional[int]:
+        max_time: int,
+        op5_max_wait_slots: int
+    ) -> Optional[Tuple[int, int]]:
         if not op6.time_windows:
             return None
-        total_pre = op4.duration + op5.duration
+        op5_min = max(0, op5.duration)
+        op5_max_wait = max(0, op5_max_wait_slots)
+        total_min = op4.duration + op5_min
+        total_max = total_min + op5_max_wait
         for ws, we in sorted(op6.time_windows):
-            t6 = max(ws, earliest + total_pre)
+            t6 = max(ws, earliest + total_min)
             while t6 + op6.duration <= we and t6 + op6.duration <= max_time:
-                start4 = t6 - total_pre
-                if self._block_available(schedules, op4, op5, op6, start4):
-                    return start4
+                latest_start4 = t6 - total_min
+                earliest_start4 = t6 - total_max
+                if latest_start4 < earliest:
+                    t6 += 1
+                    continue
+                start4_min = max(earliest, earliest_start4)
+                start4 = latest_start4
+                while start4 >= start4_min:
+                    if self._block_available(schedules, op4, op5, op6, start4, t6):
+                        return start4, t6
+                    start4 -= 1
                 t6 += 1
         return None
     
     def _get_tasks_to_schedule(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         horizon_end: int
     ) -> List[Task]:

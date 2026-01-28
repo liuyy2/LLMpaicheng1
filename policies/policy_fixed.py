@@ -7,12 +7,10 @@
 - 固定权重 (w_delay, w_shift, w_switch)
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 from policies.base import BasePolicy, MetaParams
-from disturbance import SimulationState
 from config import Config
-from solver_cpsat import Plan
 
 
 class FixedWeightPolicy(BasePolicy):
@@ -77,7 +75,7 @@ class FixedWeightPolicy(BasePolicy):
     
     def decide(
         self,
-        state: SimulationState,
+        state: Any,
         now: int,
         config: Config
     ) -> Tuple[MetaParams, None]:
