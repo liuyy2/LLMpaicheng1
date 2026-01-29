@@ -284,6 +284,87 @@ def generate_resources_v2_1(
     return resources
 
 
+def generate_disturbance_timeline_v2_1(
+    seed: int,
+    missions: List[Mission],
+    resources: List[Resource],
+    config: Config
+) -> List[DisturbanceEvent]:
+    """
+    Generate a lightweight disturbance timeline for V2.1.
+    Keep it simple and deterministic per seed.
+    """
+    rng = random.Random(seed + 4000)
+    events: List[DisturbanceEvent] = []
+
+    sim_total = config.sim_total_slots
+    slot_minutes = config.slot_minutes
+
+    weather_min = max(1, int(round(config.weather_duration_range[0] * 60 / slot_minutes)))
+    weather_max = max(weather_min, int(round(config.weather_duration_range[1] * 60 / slot_minutes)))
+    outage_min = max(1, int(round(config.outage_duration_range[0] * 60 / slot_minutes)))
+    outage_max = max(outage_min, int(round(config.outage_duration_range[1] * 60 / slot_minutes)))
+
+    pad_ids = [r.resource_id for r in resources if r.resource_id.startswith("R_pad")]
+    step = max(1, config.rolling_interval)
+
+    for t in range(0, sim_total, step):
+        if rng.random() < config.p_weather:
+            dur = rng.randint(weather_min, weather_max)
+            end = min(sim_total - 1, t + dur)
+            events.append(DisturbanceEvent(
+                event_type="weather",
+                trigger_time=t,
+                target_id=None,
+                params={
+                    "delete_ratio": rng.uniform(0.2, 0.6),
+                    "affected_start": t,
+                    "affected_end": end
+                }
+            ))
+
+        if pad_ids and rng.random() < config.p_pad_outage:
+            dur = rng.randint(outage_min, outage_max)
+            end = min(sim_total - 1, t + dur)
+            events.append(DisturbanceEvent(
+                event_type="pad_outage",
+                trigger_time=t,
+                target_id=rng.choice(pad_ids),
+                params={
+                    "outage_start": min(sim_total - 1, t + 1),
+                    "outage_end": end
+                }
+            ))
+
+    # Light release/duration perturbations (optional)
+    for mission in missions:
+        if rng.random() < 0.05:
+            shift = int(round(rng.gauss(0.0, config.sigma_release)))
+            if shift != 0:
+                new_release = max(0, mission.release + shift)
+                events.append(DisturbanceEvent(
+                    event_type="release",
+                    trigger_time=min(sim_total - 1, new_release),
+                    target_id=mission.mission_id,
+                    params={"new_release": new_release}
+                ))
+
+        if rng.random() < 0.05:
+            candidates = [op for op in mission.operations if op.op_index not in (5, 6)]
+            if candidates:
+                op = rng.choice(candidates)
+                multiplier = max(0.5, min(1.5, rng.gauss(1.0, config.sigma_duration)))
+                events.append(DisturbanceEvent(
+                    event_type="duration",
+                    trigger_time=min(sim_total - 1, mission.release),
+                    target_id=op.op_id,
+                    params={"multiplier": multiplier}
+                ))
+
+    events.sort(key=lambda e: e.trigger_time)
+    return events
+
+
 def generate_scenario(
     seed: int,
     config: Config = DEFAULT_CONFIG

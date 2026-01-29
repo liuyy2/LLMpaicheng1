@@ -23,6 +23,13 @@ class Config:
     default_w_delay: float = 10.0
     default_w_shift: float = 1.0
     default_w_switch: float = 5.0
+
+    # ========== V3 二阶段参数 ==========
+    use_two_stage_solver: bool = True
+    default_epsilon_solver: float = 0.05
+    default_kappa_win: float = 12.0
+    default_kappa_seq: float = 6.0
+    stage1_time_ratio: float = 0.4
     
     # 扰动参数
     p_weather: float = 0.02

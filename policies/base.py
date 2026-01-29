@@ -20,6 +20,10 @@ class MetaParams:
     w_shift: float                            # shift 权重
     w_switch: float                           # switch 权重
     freeze_horizon: Optional[int] = None      # 可选覆盖冻结视野
+    use_two_stage: Optional[bool] = None      # 是否启用二阶段
+    epsilon_solver: Optional[float] = None    # Stage 2延迟容差
+    kappa_win: Optional[float] = None         # 窗口切换等效slot
+    kappa_seq: Optional[float] = None         # 序列切换等效slot
     
     def to_weights(self) -> Tuple[float, float, float]:
         """返回权重元组"""

@@ -66,7 +66,11 @@ class RollingSnapshot:
                 'w_delay': self.meta_params.w_delay,
                 'w_shift': self.meta_params.w_shift,
                 'w_switch': self.meta_params.w_switch,
-                'freeze_horizon': self.meta_params.freeze_horizon
+                'freeze_horizon': self.meta_params.freeze_horizon,
+                'use_two_stage': self.meta_params.use_two_stage,
+                'epsilon_solver': self.meta_params.epsilon_solver,
+                'kappa_win': self.meta_params.kappa_win,
+                'kappa_seq': self.meta_params.kappa_seq
             } if self.meta_params else None,
             'infeasible_reasons': self.infeasible_reasons,
             'state_features': self.state_features
@@ -418,9 +422,17 @@ def _simulate_episode_v2_1(
         if meta_params:
             freeze_h = meta_params.freeze_horizon if meta_params.freeze_horizon is not None else config.freeze_horizon
             weights = meta_params.to_weights()
+            use_two_stage = config.use_two_stage_solver if meta_params.use_two_stage is None else meta_params.use_two_stage
+            epsilon_solver = meta_params.epsilon_solver if meta_params.epsilon_solver is not None else config.default_epsilon_solver
+            kappa_win = meta_params.kappa_win if meta_params.kappa_win is not None else config.default_kappa_win
+            kappa_seq = meta_params.kappa_seq if meta_params.kappa_seq is not None else config.default_kappa_seq
         else:
             freeze_h = config.freeze_horizon
             weights = (config.default_w_delay, config.default_w_shift, config.default_w_switch)
+            use_two_stage = config.use_two_stage_solver
+            epsilon_solver = config.default_epsilon_solver
+            kappa_win = config.default_kappa_win
+            kappa_seq = config.default_kappa_seq
 
         horizon_end = min(now + horizon, sim_total)
         solver_horizon = sim_total
@@ -459,7 +471,12 @@ def _simulate_episode_v2_1(
                 op5_max_wait_slots=max(
                     0,
                     int(round(config.op5_max_wait_hours * 60 / config.slot_minutes))
-                )
+                ),
+                use_two_stage=use_two_stage,
+                epsilon_solver=epsilon_solver,
+                kappa_win=kappa_win,
+                kappa_seq=kappa_seq,
+                stage1_time_ratio=config.stage1_time_ratio
             )
 
             result = solve_v2_1(
@@ -488,14 +505,15 @@ def _simulate_episode_v2_1(
             old_plan=old_plan,
             new_plan=state.current_plan,
             completed_ops=state.completed_ops,
+            started_ops=state.started_ops,
+            frozen_ops=set(frozen_ops.keys()),
             missions=state.missions,
-            horizon=horizon,
             solve_time_ms=result.solve_time_ms,
             is_feasible=is_feasible,
             forced_replan=forced_replan,
             frozen_count=len(frozen_ops),
-            alpha=config.drift_alpha,
-            beta=config.drift_beta
+            kappa_win=kappa_win,
+            kappa_seq=kappa_seq
         )
 
         rolling_metrics_list.append(rolling_m)
@@ -637,6 +655,7 @@ def save_episode_logs(
     with open(metrics_csv_path, 'w', newline='', encoding='utf-8') as f:
         fieldnames = [
             "t", "plan_drift", "avg_time_shift_slots", "num_shifts", "num_switches",
+            "num_window_switches", "num_sequence_switches",
             "num_tasks_scheduled", "num_frozen", "solve_time_ms",
             "is_feasible", "forced_replan"
         ]

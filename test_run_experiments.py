@@ -22,7 +22,7 @@ def test_imports():
         save_episode_results, HAS_REAL_LLM
     )
     print(f"   HAS_REAL_LLM = {HAS_REAL_LLM}")
-    print("   ✓ 导入成功")
+    print("   OK 导入成功")
     return True
 
 
@@ -48,10 +48,10 @@ def test_record_fields():
     missing = [f for f in required_fields if f not in fields]
     
     if missing:
-        print(f"   ✗ 缺少字段: {missing}")
+        print(f"   FAIL 缺少字段: {missing}")
         return False
     
-    print(f"   ✓ 所有必需字段存在")
+    print(f"   OK 所有必需字段存在")
     return True
 
 
@@ -85,7 +85,7 @@ def test_mockllm_run():
         files = os.listdir(log_dir)
         print(f"   日志文件: {files}")
     
-    print("   ✓ mockllm 运行成功")
+    print("   OK mockllm 运行成功")
     return True
 
 
@@ -104,8 +104,12 @@ def test_csv_output():
         completed=10, total=10, on_time_rate=1.0, avg_delay=0.0, max_delay=0,
         weighted_tardiness=0.0, resource_utilization=0.0,
         episode_drift=0.001, total_shifts=2, total_switches=1,
+        total_window_switches=0, total_sequence_switches=0,
         num_replans=5, num_forced_replans=0, avg_solve_time_ms=100.0,
         total_runtime_s=1.0,
+        avg_time_deviation_min=0.0, total_resource_switches=0,
+        makespan_cmax=0, feasible_rate=1.0, forced_replan_rate=0.0,
+        avg_frozen=0.0, avg_num_tasks_scheduled=0.0, util_r_pad=0.0,
         llm_calls=5, llm_time_total_ms=500, llm_latency_total_ms=450,
         llm_prompt_tokens=100, llm_completion_tokens=50, llm_total_tokens=150,
         llm_cache_hit_rate=0.4, llm_fallback_count=1,
@@ -122,7 +126,7 @@ def test_csv_output():
         llm_fields = [k for k in row.keys() if 'llm' in k or 'solver_time' in k or 'wall_time' in k]
         print(f"   LLM 相关字段: {llm_fields}")
     
-    print("   ✓ CSV 输出正确")
+    print("   OK CSV 输出正确")
     return True
 
 
@@ -147,7 +151,7 @@ def test_llm_real_warning():
         exp_config.max_workers = 1
     
     print(f"   最终 workers={exp_config.max_workers}")
-    print("   ✓ 并行警告逻辑正确")
+    print("   OK 并行警告逻辑正确")
     return True
 
 
@@ -167,10 +171,10 @@ def test_seed_assignments():
     overlap = train_seeds & test_seeds
     
     if overlap:
-        print(f"   ✗ 种子重叠: {overlap}")
+        print(f"   FAIL 种子重叠: {overlap}")
         return False
     
-    print("   ✓ 种子分配正确")
+    print("   OK 种子分配正确")
     return True
 
 
@@ -179,7 +183,7 @@ def cleanup():
     import shutil
     output_dir = "test_output_temp"
     if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def main():
@@ -206,7 +210,7 @@ def main():
             else:
                 failed += 1
         except Exception as e:
-            print(f"   ✗ 异常: {e}")
+            print(f"   FAIL 异常: {e}")
             failed += 1
     
     print("\n" + "=" * 60)

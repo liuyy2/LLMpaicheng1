@@ -34,7 +34,11 @@ class FixedWeightPolicy(BasePolicy):
         w_shift: float = 1.0,
         w_switch: float = 5.0,
         freeze_horizon: Optional[int] = None,
-        policy_name: str = "fixed"
+        policy_name: str = "fixed",
+        use_two_stage: Optional[bool] = None,
+        epsilon_solver: Optional[float] = None,
+        kappa_win: Optional[float] = None,
+        kappa_seq: Optional[float] = None
     ):
         """
         Args:
@@ -49,6 +53,10 @@ class FixedWeightPolicy(BasePolicy):
         self._w_switch = w_switch
         self._freeze_horizon = freeze_horizon
         self._policy_name = policy_name
+        self._use_two_stage = use_two_stage
+        self._epsilon_solver = epsilon_solver
+        self._kappa_win = kappa_win
+        self._kappa_seq = kappa_seq
         
         # 统计信息（可选）
         self._call_count = 0
@@ -98,7 +106,11 @@ class FixedWeightPolicy(BasePolicy):
             w_delay=self._w_delay,
             w_shift=self._w_shift,
             w_switch=self._w_switch,
-            freeze_horizon=effective_freeze
+            freeze_horizon=effective_freeze,
+            use_two_stage=self._use_two_stage,
+            epsilon_solver=self._epsilon_solver,
+            kappa_win=self._kappa_win,
+            kappa_seq=self._kappa_seq
         ), None
     
     def reset(self) -> None:

@@ -820,6 +820,11 @@ class SolverConfigV2_1:
     time_limit_seconds: float = 60.0
     num_workers: int = 4
     op5_max_wait_slots: int = 144
+    use_two_stage: bool = True
+    epsilon_solver: float = 0.05
+    kappa_win: float = 12.0
+    kappa_seq: float = 6.0
+    stage1_time_ratio: float = 0.4
 
 
 def solve_v2_1(
@@ -836,9 +841,401 @@ def solve_v2_1(
         frozen_ops = {}
 
     start_time = time.time()
-    result = _solve_v2_1_with_config(missions, resources, horizon, prev_plan, frozen_ops, config)
+    if config.use_two_stage:
+        result = _solve_v2_1_two_stage(
+            missions, resources, horizon, prev_plan, frozen_ops, config
+        )
+    else:
+        result = _solve_v2_1_with_config(missions, resources, horizon, prev_plan, frozen_ops, config)
     result.solve_time_ms = int((time.time() - start_time) * 1000)
     return result
+
+
+def _solve_v2_1_two_stage(
+    missions: List[Mission],
+    resources: List[Resource],
+    horizon: int,
+    prev_plan: Optional[PlanV2_1],
+    frozen_ops: Dict[str, OpAssignment],
+    config: SolverConfigV2_1
+) -> SolverResult:
+    if not missions:
+        return SolverResult(
+            status=SolveStatus.OPTIMAL,
+            plan=PlanV2_1(timestamp=0, op_assignments=[]),
+            objective_value=0.0
+        )
+
+    stage1_time = max(0.1, config.time_limit_seconds * config.stage1_time_ratio)
+    stage1_config = SolverConfigV2_1(
+        horizon_slots=config.horizon_slots,
+        w_delay=config.w_delay,
+        w_shift=0.0,
+        w_switch=0.0,
+        time_limit_seconds=stage1_time,
+        num_workers=config.num_workers,
+        op5_max_wait_slots=config.op5_max_wait_slots,
+        use_two_stage=False,
+        epsilon_solver=config.epsilon_solver,
+        kappa_win=config.kappa_win,
+        kappa_seq=config.kappa_seq,
+        stage1_time_ratio=config.stage1_time_ratio
+    )
+
+    result_stage1 = _solve_v2_1_with_config(
+        missions, resources, horizon, prev_plan, frozen_ops, stage1_config
+    )
+    if result_stage1.status not in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
+        return result_stage1
+
+    total_delay_stage1 = 0.0
+    if result_stage1.plan:
+        for mission in missions:
+            op6 = mission.get_operation(6)
+            if not op6:
+                continue
+            assign = result_stage1.plan.get_assignment(op6.op_id)
+            if not assign:
+                continue
+            delay = max(0, assign.start_slot - mission.due)
+            total_delay_stage1 += mission.priority * delay
+
+    delay_bound = total_delay_stage1 * (1 + config.epsilon_solver)
+    stage2_time = max(0.1, config.time_limit_seconds * (1 - config.stage1_time_ratio))
+    stage2_config = SolverConfigV2_1(
+        horizon_slots=config.horizon_slots,
+        w_delay=config.w_delay,
+        w_shift=config.w_shift,
+        w_switch=config.w_switch,
+        time_limit_seconds=stage2_time,
+        num_workers=config.num_workers,
+        op5_max_wait_slots=config.op5_max_wait_slots,
+        use_two_stage=False,
+        epsilon_solver=config.epsilon_solver,
+        kappa_win=config.kappa_win,
+        kappa_seq=config.kappa_seq,
+        stage1_time_ratio=config.stage1_time_ratio
+    )
+
+    result_stage2 = _solve_v2_1_stage2_with_delay_bound(
+        missions, resources, horizon, prev_plan, frozen_ops, stage2_config, delay_bound
+    )
+    if result_stage2.status in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
+        return result_stage2
+
+    return result_stage1
+
+
+def _solve_v2_1_stage2_with_delay_bound(
+    missions: List[Mission],
+    resources: List[Resource],
+    horizon: int,
+    prev_plan: Optional[PlanV2_1],
+    frozen_ops: Dict[str, OpAssignment],
+    config: SolverConfigV2_1,
+    delay_bound: float
+) -> SolverResult:
+    if not missions:
+        return SolverResult(
+            status=SolveStatus.OPTIMAL,
+            plan=PlanV2_1(timestamp=0, op_assignments=[]),
+            objective_value=0.0
+        )
+
+    model = cp_model.CpModel()
+
+    all_ops = []
+    for mission in missions:
+        all_ops.extend(mission.operations)
+
+    start_vars: Dict[str, cp_model.IntVar] = {}
+    end_vars: Dict[str, cp_model.IntVar] = {}
+    interval_vars: Dict[str, cp_model.IntervalVar] = {}
+
+    op5_max_wait_slots = max(0, config.op5_max_wait_slots)
+    for op in all_ops:
+        start_vars[op.op_id] = model.NewIntVar(
+            op.release, horizon, f"start_{op.op_id}"
+        )
+        if op.op_index == 5:
+            min_duration = max(0, op.duration)
+            max_duration = min_duration + op5_max_wait_slots
+            duration_var = model.NewIntVar(
+                min_duration, max_duration, f"dur_{op.op_id}"
+            )
+            end_vars[op.op_id] = model.NewIntVar(
+                op.release + min_duration, horizon + max_duration, f"end_{op.op_id}"
+            )
+            model.Add(end_vars[op.op_id] == start_vars[op.op_id] + duration_var)
+            interval_vars[op.op_id] = model.NewIntervalVar(
+                start_vars[op.op_id],
+                duration_var,
+                end_vars[op.op_id],
+                f"interval_{op.op_id}"
+            )
+        else:
+            end_vars[op.op_id] = model.NewIntVar(
+                op.release + op.duration, horizon + op.duration, f"end_{op.op_id}"
+            )
+            model.Add(end_vars[op.op_id] == start_vars[op.op_id] + op.duration)
+            interval_vars[op.op_id] = model.NewIntervalVar(
+                start_vars[op.op_id],
+                op.duration,
+                end_vars[op.op_id],
+                f"interval_{op.op_id}"
+            )
+
+    for op in all_ops:
+        for pred_id in op.precedences:
+            if pred_id in end_vars:
+                model.Add(start_vars[op.op_id] >= end_vars[pred_id])
+
+    for mission in missions:
+        op4 = mission.get_operation(4)
+        op5 = mission.get_operation(5)
+        op6 = mission.get_operation(6)
+        if not op4 or not op5 or not op6:
+            continue
+        if op4.op_id in end_vars and op5.op_id in start_vars:
+            model.Add(start_vars[op5.op_id] == end_vars[op4.op_id])
+        if op5.op_id in end_vars and op6.op_id in start_vars:
+            model.Add(start_vars[op6.op_id] == end_vars[op5.op_id])
+
+    resource_intervals: Dict[str, List[cp_model.IntervalVar]] = {
+        r.resource_id: [] for r in resources
+    }
+
+    for op in all_ops:
+        for res_id in op.resources:
+            if res_id in resource_intervals:
+                resource_intervals[res_id].append(interval_vars[op.op_id])
+
+    for resource in resources:
+        for closure_idx, (cs, ce) in enumerate(resource.unavailable):
+            duration = ce - cs + 1
+            try:
+                blocker = model.NewFixedSizedIntervalVar(
+                    cs, duration, f"closure_{resource.resource_id}_{closure_idx}"
+                )
+            except AttributeError:
+                blocker = model.NewFixedSizeIntervalVar(
+                    cs, duration, f"closure_{resource.resource_id}_{closure_idx}"
+                )
+            resource_intervals[resource.resource_id].append(blocker)
+
+    for res_id, intervals in resource_intervals.items():
+        if intervals:
+            model.AddNoOverlap(intervals)
+
+    window_choice_vars: Dict[str, List[cp_model.BoolVar]] = {}
+    prev_window_index: Dict[str, Optional[int]] = {}
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        if not op6 or not op6.time_windows:
+            continue
+        window_choice = []
+        for win_idx, (ws, we) in enumerate(op6.time_windows):
+            in_window = model.NewBoolVar(f"op6_{op6.op_id}_window_{win_idx}")
+            window_choice.append(in_window)
+            model.Add(start_vars[op6.op_id] >= ws).OnlyEnforceIf(in_window)
+            model.Add(end_vars[op6.op_id] <= we).OnlyEnforceIf(in_window)
+        model.AddExactlyOne(window_choice)
+        window_choice_vars[op6.op_id] = window_choice
+        prev_idx = None
+        if prev_plan:
+            prev_assign = prev_plan.get_assignment(op6.op_id)
+            if prev_assign:
+                for idx, (ws, we) in enumerate(op6.time_windows):
+                    if prev_assign.start_slot >= ws and prev_assign.end_slot <= we:
+                        prev_idx = idx
+                        break
+        prev_window_index[op6.op_id] = prev_idx
+
+    for op_id, frozen in frozen_ops.items():
+        if op_id in start_vars:
+            model.Add(start_vars[op_id] == frozen.start_slot)
+            model.Add(end_vars[op_id] == frozen.end_slot)
+
+    delay_vars = {}
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        if not op6 or op6.op_id not in start_vars:
+            continue
+        delay_var = model.NewIntVar(0, horizon, f"delay_{mission.mission_id}")
+        model.AddMaxEquality(delay_var, [0, start_vars[op6.op_id] - mission.due])
+        delay_vars[mission.mission_id] = delay_var
+
+    total_delay_terms = []
+    for mission in missions:
+        if mission.mission_id in delay_vars:
+            weight = int(round(mission.priority * 100))
+            total_delay_terms.append(weight * delay_vars[mission.mission_id])
+
+    if total_delay_terms:
+        model.Add(sum(total_delay_terms) <= int(round(delay_bound * 100)))
+
+    objective_terms = []
+    max_shift = max(0, horizon)
+
+    shift_abs_vars: Dict[str, cp_model.IntVar] = {}
+    window_switch_vars: Dict[str, cp_model.IntVar] = {}
+    seq_switch_vars: Dict[str, cp_model.IntVar] = {}
+
+    if prev_plan:
+        for mission in missions:
+            op6 = mission.get_operation(6)
+            op4 = mission.get_operation(4)
+            if op6 and op6.op_id in start_vars:
+                prev_assign = prev_plan.get_assignment(op6.op_id)
+                if prev_assign:
+                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{op6.op_id}")
+                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{op6.op_id}")
+                    model.Add(diff_var == start_vars[op6.op_id] - prev_assign.start_slot)
+                    model.AddAbsEquality(shift_abs, diff_var)
+                    shift_abs_vars[op6.op_id] = shift_abs
+            if op4 and op4.op_id in start_vars:
+                prev_assign = prev_plan.get_assignment(op4.op_id)
+                if prev_assign:
+                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{op4.op_id}")
+                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{op4.op_id}")
+                    model.Add(diff_var == start_vars[op4.op_id] - prev_assign.start_slot)
+                    model.AddAbsEquality(shift_abs, diff_var)
+                    shift_abs_vars[op4.op_id] = shift_abs
+
+    for op_id, choice in window_choice_vars.items():
+        prev_idx = prev_window_index.get(op_id)
+        if prev_idx is not None and 0 <= prev_idx < len(choice):
+            switched = model.NewBoolVar(f"window_switch_{op_id}")
+            model.Add(switched == 0).OnlyEnforceIf(choice[prev_idx])
+            model.Add(switched == 1).OnlyEnforceIf(choice[prev_idx].Not())
+            window_switch_vars[op_id] = switched
+        else:
+            window_switch_vars[op_id] = model.NewConstant(0)
+
+    prev_pred: Dict[str, str] = {}
+    if prev_plan:
+        prev_order = []
+        for mission in missions:
+            op4 = mission.get_operation(4)
+            if not op4:
+                continue
+            prev_assign = prev_plan.get_assignment(op4.op_id)
+            if prev_assign and "R_pad" in prev_assign.resources:
+                prev_order.append((mission.mission_id, prev_assign.start_slot))
+        prev_order.sort(key=lambda x: x[1])
+        for idx in range(1, len(prev_order)):
+            prev_pred[prev_order[idx][0]] = prev_order[idx - 1][0]
+
+    start_op4: Dict[str, cp_model.IntVar] = {}
+    for mission in missions:
+        op4 = mission.get_operation(4)
+        if op4 and op4.op_id in start_vars:
+            start_op4[mission.mission_id] = start_vars[op4.op_id]
+
+    for mission in missions:
+        pred_id = prev_pred.get(mission.mission_id)
+        if not pred_id:
+            continue
+        if pred_id not in start_op4 or mission.mission_id not in start_op4:
+            continue
+
+        pred_kept = model.NewBoolVar(f"pred_kept_{mission.mission_id}")
+        seq_switch = model.NewBoolVar(f"seq_switch_{mission.mission_id}")
+        model.Add(pred_kept + seq_switch == 1)
+
+        start_p = start_op4[pred_id]
+        start_m = start_op4[mission.mission_id]
+
+        pred_before = model.NewBoolVar(f"pred_before_{mission.mission_id}")
+        model.Add(start_p <= start_m - 1).OnlyEnforceIf(pred_before)
+        model.Add(start_p >= start_m).OnlyEnforceIf(pred_before.Not())
+        model.Add(pred_before == 1).OnlyEnforceIf(pred_kept)
+
+        for other_id, start_q in start_op4.items():
+            if other_id in (mission.mission_id, pred_id):
+                continue
+            q_before_p = model.NewBoolVar(f"q_before_{other_id}_p_{mission.mission_id}")
+            model.Add(start_q <= start_p).OnlyEnforceIf(q_before_p)
+            model.Add(start_q >= start_p + 1).OnlyEnforceIf(q_before_p.Not())
+
+            q_after_m = model.NewBoolVar(f"q_after_{other_id}_m_{mission.mission_id}")
+            model.Add(start_q >= start_m).OnlyEnforceIf(q_after_m)
+            model.Add(start_q <= start_m - 1).OnlyEnforceIf(q_after_m.Not())
+
+            model.AddBoolOr([q_before_p, q_after_m]).OnlyEnforceIf(pred_kept)
+
+        seq_switch_vars[mission.mission_id] = seq_switch
+
+    scale = 100
+    for mission in missions:
+        op6 = mission.get_operation(6)
+        op4 = mission.get_operation(4)
+        if op6 and op6.op_id in shift_abs_vars:
+            weight = int(round(mission.priority * 0.7 * scale))
+            objective_terms.append(weight * shift_abs_vars[op6.op_id])
+        if op4 and op4.op_id in shift_abs_vars:
+            weight = int(round(mission.priority * 0.3 * scale))
+            objective_terms.append(weight * shift_abs_vars[op4.op_id])
+
+        if op6 and op6.op_id in window_switch_vars:
+            weight = int(round(mission.priority * config.kappa_win * scale))
+            objective_terms.append(weight * window_switch_vars[op6.op_id])
+
+        if mission.mission_id in seq_switch_vars:
+            weight = int(round(mission.priority * config.kappa_seq * scale))
+            objective_terms.append(weight * seq_switch_vars[mission.mission_id])
+
+    if objective_terms:
+        model.Minimize(sum(objective_terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = config.time_limit_seconds
+    solver.parameters.num_search_workers = config.num_workers
+
+    status = solver.Solve(model)
+
+    if status == cp_model.OPTIMAL:
+        solve_status = SolveStatus.OPTIMAL
+    elif status == cp_model.FEASIBLE:
+        solve_status = SolveStatus.FEASIBLE
+    elif status == cp_model.INFEASIBLE:
+        return SolverResult(
+            status=SolveStatus.INFEASIBLE,
+            plan=None,
+            num_variables=model.Proto().variables.__len__(),
+            num_constraints=model.Proto().constraints.__len__()
+        )
+    else:
+        return SolverResult(
+            status=SolveStatus.TIMEOUT,
+            plan=None,
+            num_variables=model.Proto().variables.__len__(),
+            num_constraints=model.Proto().constraints.__len__()
+        )
+
+    op_assignments = []
+    for op in all_ops:
+        if op.op_id in start_vars:
+            start = solver.Value(start_vars[op.op_id])
+            end = solver.Value(end_vars[op.op_id])
+            op_assignments.append(OpAssignment(
+                op_id=op.op_id,
+                mission_id=op.mission_id,
+                op_index=op.op_index,
+                resources=op.resources,
+                start_slot=start,
+                end_slot=end
+            ))
+
+    plan = PlanV2_1(timestamp=0, op_assignments=op_assignments)
+
+    return SolverResult(
+        status=solve_status,
+        plan=plan,
+        objective_value=solver.ObjectiveValue() / 100.0 if objective_terms else 0.0,
+        num_variables=model.Proto().variables.__len__(),
+        num_constraints=model.Proto().constraints.__len__()
+    )
 
 
 def _solve_v2_1_with_config(
@@ -980,7 +1377,7 @@ def _solve_v2_1_with_config(
         if not op6 or op6.op_id not in end_vars:
             continue
         delay_var = model.NewIntVar(0, horizon, f"delay_{mission.mission_id}")
-        model.AddMaxEquality(delay_var, [0, end_vars[op6.op_id] - mission.due])
+        model.AddMaxEquality(delay_var, [0, start_vars[op6.op_id] - mission.due])
         weight = int(config.w_delay * mission.priority * 100)
         objective_terms.append(weight * delay_var)
 

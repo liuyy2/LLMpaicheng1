@@ -15,17 +15,19 @@ from solver_cpsat import Plan, TaskAssignment, Task, PlanV2_1, OpAssignment, Mis
 
 @dataclass
 class RollingMetrics:
-    """单次 Rolling 的指标"""
-    t: int                                    # 时刻
-    plan_drift: float                         # PlanDrift_t
-    avg_time_shift_slots: float               # 平均时间偏移 (slots)
-    num_shifts: int                           # 时间变化任务数
-    num_switches: int                         # Pad 切换任务数
-    num_tasks_scheduled: int                  # 排程任务数
-    num_frozen: int                           # 冻结任务数
-    solve_time_ms: int                        # 求解时间
-    is_feasible: bool                         # 是否可行
-    forced_replan: bool                       # 是否强制重排
+    """Single rolling metrics."""
+    t: int
+    plan_drift: float
+    avg_time_shift_slots: float
+    num_shifts: int
+    num_switches: int
+    num_window_switches: int
+    num_sequence_switches: int
+    num_tasks_scheduled: int
+    num_frozen: int
+    solve_time_ms: int
+    is_feasible: bool
+    forced_replan: bool
 
 
 @dataclass
@@ -43,6 +45,9 @@ class EpisodeMetrics:
     episode_drift: float                      # Episode 总 Drift (单标量)
     total_shifts: int                         # 总时间变化次数
     total_switches: int                       # 总 Pad 切换次数
+
+    total_window_switches: int
+    total_sequence_switches: int
     
     # 求解性能
     total_solve_time_ms: int                  # 总求解时间
@@ -227,51 +232,87 @@ def compute_plan_drift(
     return plan_drift, num_shifts, num_switches, avg_time_shift_slots
 
 
-def compute_op_time_drift(
-    op_id: str,
+def _get_mission_by_id(missions: List[Mission], mission_id: str) -> Optional[Mission]:
+    for mission in missions:
+        if mission.mission_id == mission_id:
+            return mission
+    return None
+
+
+def compute_launch_drift(
+    mission_id: str,
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
-    horizon: int
-) -> float:
-    """Compute op time drift using start time."""
+    missions: List[Mission]
+) -> int:
     if old_plan is None:
-        return 0.0
+        return 0
 
-    old_assign = old_plan.get_assignment(op_id)
-    new_assign = new_plan.get_assignment(op_id)
+    mission = _get_mission_by_id(missions, mission_id)
+    if not mission:
+        return 0
 
+    op6 = mission.get_operation(6)
+    if not op6:
+        return 0
+
+    old_assign = old_plan.get_assignment(op6.op_id)
+    new_assign = new_plan.get_assignment(op6.op_id)
     if old_assign is None or new_assign is None:
-        return 0.0
+        return 0
 
-    diff = abs(new_assign.start_slot - old_assign.start_slot)
-    return min(1.0, diff / horizon) if horizon > 0 else 0.0
+    return abs(new_assign.start_slot - old_assign.start_slot)
 
 
-def compute_op_resource_drift(
-    op_id: str,
+def compute_pad_hold_start_drift(
+    mission_id: str,
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
-    op6_windows: Dict[str, List[Tuple[int, int]]]
-) -> float:
-    """Compute op6 window switch drift (0/1) for V2.1."""
+    missions: List[Mission]
+) -> int:
     if old_plan is None:
-        return 0.0
+        return 0
 
-    old_assign = old_plan.get_assignment(op_id)
-    new_assign = new_plan.get_assignment(op_id)
+    mission = _get_mission_by_id(missions, mission_id)
+    if not mission:
+        return 0
 
+    op4 = mission.get_operation(4)
+    if not op4:
+        return 0
+
+    old_assign = old_plan.get_assignment(op4.op_id)
+    new_assign = new_plan.get_assignment(op4.op_id)
     if old_assign is None or new_assign is None:
-        return 0.0
+        return 0
 
-    if old_assign.op_index != 6 or new_assign.op_index != 6:
-        return 0.0
+    return abs(new_assign.start_slot - old_assign.start_slot)
 
-    windows = op6_windows.get(op_id, [])
-    if not windows:
-        return 0.0
+
+def compute_window_switch(
+    mission_id: str,
+    old_plan: Optional[PlanV2_1],
+    new_plan: PlanV2_1,
+    missions: List[Mission]
+) -> int:
+    if old_plan is None:
+        return 0
+
+    mission = _get_mission_by_id(missions, mission_id)
+    if not mission:
+        return 0
+
+    op6 = mission.get_operation(6)
+    if not op6 or not op6.time_windows:
+        return 0
+
+    old_assign = old_plan.get_assignment(op6.op_id)
+    new_assign = new_plan.get_assignment(op6.op_id)
+    if old_assign is None or new_assign is None:
+        return 0
 
     def _window_index(start: int, end: int) -> Optional[int]:
-        for idx, (ws, we) in enumerate(windows):
+        for idx, (ws, we) in enumerate(op6.time_windows):
             if start >= ws and end <= we:
                 return idx
         return None
@@ -279,77 +320,152 @@ def compute_op_resource_drift(
     old_idx = _window_index(old_assign.start_slot, old_assign.end_slot)
     new_idx = _window_index(new_assign.start_slot, new_assign.end_slot)
     if old_idx is None or new_idx is None:
-        return 0.0
+        return 0
 
-    return 1.0 if old_idx != new_idx else 0.0
+    return 1 if old_idx != new_idx else 0
 
 
-def compute_op_npd(
-    op_id: str,
+def _pad_sequence(plan: PlanV2_1, missions: List[Mission]) -> List[str]:
+    sequence = []
+    for mission in missions:
+        op4 = mission.get_operation(4)
+        if not op4:
+            continue
+        assign = plan.get_assignment(op4.op_id)
+        if assign and "R_pad" in assign.resources:
+            sequence.append((mission.mission_id, assign.start_slot))
+    sequence.sort(key=lambda x: x[1])
+    return [m for m, _ in sequence]
+
+
+def compute_sequence_switch(
+    mission_id: str,
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
-    op6_windows: Dict[str, List[Tuple[int, int]]],
-    horizon: int,
-    alpha: float = 0.7,
-    beta: float = 0.3
+    missions: List[Mission]
+) -> int:
+    if old_plan is None:
+        return 0
+
+    old_seq = _pad_sequence(old_plan, missions)
+    new_seq = _pad_sequence(new_plan, missions)
+
+    if mission_id not in old_seq or mission_id not in new_seq:
+        return 0
+
+    old_idx = old_seq.index(mission_id)
+    new_idx = new_seq.index(mission_id)
+
+    if old_idx == 0:
+        return 0
+
+    old_pred = old_seq[old_idx - 1]
+    new_pred = new_seq[new_idx - 1] if new_idx > 0 else None
+
+    if new_pred is None:
+        return 0
+
+    return 1 if new_pred != old_pred else 0
+
+
+def compute_mission_drift_v3(
+    mission_id: str,
+    old_plan: Optional[PlanV2_1],
+    new_plan: PlanV2_1,
+    missions: List[Mission],
+    priority: float = 1.0,
+    kappa_win: float = 12.0,
+    kappa_seq: float = 6.0
 ) -> float:
-    d_time = compute_op_time_drift(op_id, old_plan, new_plan, horizon)
-    d_res = compute_op_resource_drift(op_id, old_plan, new_plan, op6_windows)
-    return alpha * d_time + beta * d_res
+    if old_plan is None:
+        return 0.0
+
+    delta_launch = compute_launch_drift(mission_id, old_plan, new_plan, missions)
+    delta_pad = compute_pad_hold_start_drift(mission_id, old_plan, new_plan, missions)
+    switch_win = compute_window_switch(mission_id, old_plan, new_plan, missions)
+    switch_seq = compute_sequence_switch(mission_id, old_plan, new_plan, missions)
+
+    time_drift = 0.7 * delta_launch + 0.3 * delta_pad
+    discrete_drift = kappa_win * switch_win + kappa_seq * switch_seq
+
+    return priority * (time_drift + discrete_drift)
 
 
 def compute_plan_drift_ops(
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
     completed_ops: Set[str],
+    started_ops: Set[str],
+    frozen_ops: Set[str],
     missions: List[Mission],
-    horizon: int,
-    alpha: float = 0.7,
-    beta: float = 0.3
-) -> Tuple[float, int, int, float]:
-        if old_plan is None:
-        return 0.0, 0, 0, 0.0
+    kappa_win: float = 12.0,
+    kappa_seq: float = 6.0
+) -> Tuple[float, int, int, float, int, int]:
+    if old_plan is None:
+        return 0.0, 0, 0, 0.0, 0, 0
 
-    old_op_ids = {a.op_id for a in old_plan.op_assignments}
-    new_op_ids = {a.op_id for a in new_plan.op_assignments}
-    common_ops = (old_op_ids & new_op_ids) - completed_ops
+    exclude_ops = set(completed_ops) | set(started_ops) | set(frozen_ops)
 
-    if not common_ops:
-        return 0.0, 0, 0, 0.0
-
-    op6_windows: Dict[str, List[Tuple[int, int]]] = {}
+    active_missions = []
     for mission in missions:
+        op4 = mission.get_operation(4)
         op6 = mission.get_operation(6)
-        if op6:
-            op6_windows[op6.op_id] = list(op6.time_windows or [])
-
-    total_npd = 0.0
-    num_shifts = 0
-    num_switches = 0
-    total_time_shift = 0.0
-
-    for op_id in common_ops:
-        old_assign = old_plan.get_assignment(op_id)
-        new_assign = new_plan.get_assignment(op_id)
-        if old_assign is None or new_assign is None:
+        if not op4 or not op6:
             continue
+        if op4.op_id in exclude_ops or op6.op_id in exclude_ops:
+            continue
+        if old_plan.get_assignment(op4.op_id) is None or old_plan.get_assignment(op6.op_id) is None:
+            continue
+        if new_plan.get_assignment(op4.op_id) is None or new_plan.get_assignment(op6.op_id) is None:
+            continue
+        active_missions.append(mission)
 
-        diff = abs(new_assign.start_slot - old_assign.start_slot)
-        total_time_shift += diff
+    if not active_missions:
+        return 0.0, 0, 0, 0.0, 0, 0
 
-        d_time = min(1.0, diff / horizon) if horizon > 0 else 0.0
-        d_res = compute_op_resource_drift(op_id, old_plan, new_plan, op6_windows)
-        npd = alpha * d_time + beta * d_res
-        total_npd += npd
+    total_drift = 0.0
+    total_time_drift = 0.0
+    num_time_shifts = 0
+    num_window_switches = 0
+    num_sequence_switches = 0
 
-        if diff > 0:
-            num_shifts += 1
-        if d_res > 0:
-            num_switches += 1
+    for mission in active_missions:
+        mission_drift = compute_mission_drift_v3(
+            mission.mission_id,
+            old_plan,
+            new_plan,
+            missions,
+            mission.priority,
+            kappa_win,
+            kappa_seq
+        )
+        total_drift += mission_drift
 
-    plan_drift = total_npd / len(common_ops)
-    avg_time_shift_slots = total_time_shift / len(common_ops)
-    return plan_drift, num_shifts, num_switches, avg_time_shift_slots
+        delta_launch = compute_launch_drift(mission.mission_id, old_plan, new_plan, missions)
+        delta_pad = compute_pad_hold_start_drift(mission.mission_id, old_plan, new_plan, missions)
+        switch_win = compute_window_switch(mission.mission_id, old_plan, new_plan, missions)
+        switch_seq = compute_sequence_switch(mission.mission_id, old_plan, new_plan, missions)
+
+        if delta_launch > 0 or delta_pad > 0:
+            num_time_shifts += 1
+            total_time_drift += 0.7 * delta_launch + 0.3 * delta_pad
+        if switch_win > 0:
+            num_window_switches += 1
+        if switch_seq > 0:
+            num_sequence_switches += 1
+
+    avg_time_shift_slots = total_time_drift / len(active_missions)
+    total_switches = num_window_switches + num_sequence_switches
+
+    return (
+        total_drift,
+        num_time_shifts,
+        total_switches,
+        avg_time_shift_slots,
+        num_window_switches,
+        num_sequence_switches
+    )
+
 
 
 def compute_rolling_metrics_ops(
@@ -357,17 +473,25 @@ def compute_rolling_metrics_ops(
     old_plan: Optional[PlanV2_1],
     new_plan: PlanV2_1,
     completed_ops: Set[str],
+    started_ops: Set[str],
+    frozen_ops: Set[str],
     missions: List[Mission],
-    horizon: int,
     solve_time_ms: int,
     is_feasible: bool,
     forced_replan: bool,
     frozen_count: int,
-    alpha: float = 0.7,
-    beta: float = 0.3
+    kappa_win: float = 12.0,
+    kappa_seq: float = 6.0
 ) -> RollingMetrics:
-        plan_drift, num_shifts, num_switches, avg_time_shift_slots = compute_plan_drift_ops(
-        old_plan, new_plan, completed_ops, missions, horizon, alpha, beta
+    plan_drift, num_shifts, num_switches, avg_time_shift_slots, num_window_switches, num_sequence_switches = compute_plan_drift_ops(
+        old_plan,
+        new_plan,
+        completed_ops,
+        started_ops,
+        frozen_ops,
+        missions,
+        kappa_win,
+        kappa_seq
     )
 
     return RollingMetrics(
@@ -376,6 +500,8 @@ def compute_rolling_metrics_ops(
         avg_time_shift_slots=avg_time_shift_slots,
         num_shifts=num_shifts,
         num_switches=num_switches,
+        num_window_switches=num_window_switches,
+        num_sequence_switches=num_sequence_switches,
         num_tasks_scheduled=len(new_plan.op_assignments) if new_plan else 0,
         num_frozen=frozen_count,
         solve_time_ms=solve_time_ms,
@@ -410,6 +536,8 @@ def compute_rolling_metrics(
         avg_time_shift_slots=avg_time_shift_slots,
         num_shifts=num_shifts,
         num_switches=num_switches,
+        num_window_switches=0,
+        num_sequence_switches=0,
         num_tasks_scheduled=len(new_plan.assignments) if new_plan else 0,
         num_frozen=frozen_count,
         solve_time_ms=solve_time_ms,
@@ -501,8 +629,8 @@ def compute_delay_metrics_ops(
     for assign in final_assignments:
         if assign.op_index != 6:
             continue
-        due = mission_due.get(assign.mission_id, assign.end_slot)
-        delay = max(0, assign.end_slot - due)
+        due = mission_due.get(assign.mission_id, assign.start_slot)
+        delay = max(0, assign.start_slot - due)
 
         total_delay += delay
         max_delay = max(max_delay, delay)
@@ -544,9 +672,9 @@ def compute_weighted_tardiness_ops(
     for assign in final_assignments:
         if assign.op_index != 6:
             continue
-        due = dues.get(assign.mission_id, assign.end_slot)
+        due = dues.get(assign.mission_id, assign.start_slot)
         priority = priorities.get(assign.mission_id, 1.0)
-        delay = max(0, assign.end_slot - due)
+        delay = max(0, assign.start_slot - due)
         total += delay * priority
 
     return total
@@ -660,6 +788,8 @@ def compute_episode_metrics(
         episode_drift=episode_drift,
         total_shifts=total_shifts,
         total_switches=total_switches,
+        total_window_switches=sum(m.num_window_switches for m in rolling_metrics_list),
+        total_sequence_switches=sum(m.num_sequence_switches for m in rolling_metrics_list),
         total_solve_time_ms=total_solve_time,
         avg_solve_time_ms=avg_solve_time,
         num_replans=num_replans,
@@ -748,6 +878,8 @@ def compute_episode_metrics_ops(
         episode_drift=episode_drift,
         total_shifts=total_shifts,
         total_switches=total_switches,
+        total_window_switches=sum(m.num_window_switches for m in rolling_metrics_list),
+        total_sequence_switches=sum(m.num_sequence_switches for m in rolling_metrics_list),
         total_solve_time_ms=total_solve_time,
         avg_solve_time_ms=avg_solve_time,
         num_replans=num_replans,
@@ -779,6 +911,8 @@ def metrics_to_dict(metrics: EpisodeMetrics) -> dict:
         "episode_drift": round(metrics.episode_drift, 4),
         "total_shifts": metrics.total_shifts,
         "total_switches": metrics.total_switches,
+        "total_window_switches": metrics.total_window_switches,
+        "total_sequence_switches": metrics.total_sequence_switches,
         "avg_time_deviation_min": round(metrics.avg_time_deviation_min, 2),
         "total_resource_switches": metrics.total_resource_switches,
         "makespan_cmax": metrics.makespan_cmax,
@@ -804,6 +938,8 @@ def rolling_metrics_to_dict(m: RollingMetrics) -> dict:
         "avg_time_shift_slots": round(m.avg_time_shift_slots, 2),
         "num_shifts": m.num_shifts,
         "num_switches": m.num_switches,
+        "num_window_switches": m.num_window_switches,
+        "num_sequence_switches": m.num_sequence_switches,
         "num_tasks_scheduled": m.num_tasks_scheduled,
         "num_frozen": m.num_frozen,
         "solve_time_ms": m.solve_time_ms,

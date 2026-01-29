@@ -497,7 +497,7 @@ def compute_delay_increase_ops(
         if not op6 or op6.op_id in completed_ops:
             continue
 
-        current_delay = max(0, assignment.end_slot - mission.due)
+        current_delay = max(0, assignment.start_slot - mission.due)
         current_total_delay += current_delay
 
         in_window = any(
@@ -763,6 +763,6 @@ if __name__ == "__main__":
         completed_ops=set()
     )
 
-print("Initial features:")
+    print("Initial features:")
     for key, value in features.to_dict().items():
         print(f"  {key}: {value}")

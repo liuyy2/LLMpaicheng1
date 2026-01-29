@@ -80,10 +80,11 @@ class ExperimentConfig:
     disturbance_levels: List[str] = field(default_factory=lambda: ["light", "medium", "heavy"])
     
     # 调参网格（扩展上界，保持4×4×4×4=256组合）
-    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 4, 8, 16])  # 增加上界到16小时
-    w_delay_values: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0, 30.0])  # 增加上界到30
-    w_shift_values: List[float] = field(default_factory=lambda: [0.0, 1.0, 3.0, 8.0])  # 增加上界到2.0
-    w_switch_values: List[float] = field(default_factory=lambda: [60, 120, 180, 240])  # 增加上界到100
+        # Tuning grid (two-stage)
+    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 4, 8, 16])
+    epsilon_solver_values: List[float] = field(default_factory=lambda: [0.0, 0.02, 0.05, 0.10])
+    kappa_win: float = 12.0
+    kappa_seq: float = 6.0
     trigger_window_loss_pct: List[float] = field(default_factory=lambda: [0.1, 0.25, 0.4])
     
     # 综合目标权重（软约束）
@@ -125,7 +126,11 @@ BASELINE_FIXED_DEFAULT = {
     "w_delay": 10.0,
     "w_shift": 1.0,
     "w_switch": 5.0,
-    "freeze_horizon": 12
+    "freeze_horizon": 12,
+    "use_two_stage": True,
+    "epsilon_solver": 0.05,
+    "kappa_win": 12.0,
+    "kappa_seq": 6.0
 }
 
 # 扰动强度对应的 Config 参数
@@ -176,6 +181,8 @@ class EpisodeMetricsRecord:
     # 稳定性
     total_shifts: int
     total_switches: int
+    total_window_switches: int
+    total_sequence_switches: int
     num_replans: int
     num_forced_replans: int
     
@@ -213,9 +220,7 @@ class EpisodeMetricsRecord:
 class TuningResult:
     """调参结果记录"""
     freeze_horizon_slots: int
-    w_delay: float
-    w_shift: float
-    w_switch: float
+    epsilon_solver: float
     
     # 训练集指标
     avg_delay: float
@@ -378,7 +383,11 @@ def run_single_episode(
             w_shift=policy_params.get("w_shift", 1.0),
             w_switch=policy_params.get("w_switch", 5.0),
             freeze_horizon=policy_params.get("freeze_horizon", 12),
-            policy_name=policy_name
+            policy_name=policy_name,
+            use_two_stage=policy_params.get("use_two_stage", True),
+            epsilon_solver=policy_params.get("epsilon_solver"),
+            kappa_win=policy_params.get("kappa_win"),
+            kappa_seq=policy_params.get("kappa_seq")
         )
     elif policy_name == "nofreeze":
         policy = NoFreezePolicy()
@@ -526,6 +535,8 @@ def run_single_episode(
         episode_drift=m.episode_drift,
         total_shifts=m.total_shifts,
         total_switches=m.total_switches,
+        total_window_switches=m.total_window_switches,
+        total_sequence_switches=m.total_sequence_switches,
         num_replans=m.num_replans,
         num_forced_replans=m.num_forced_replans,
         avg_solve_time_ms=m.avg_solve_time_ms,
@@ -576,7 +587,11 @@ def _write_episode_rolling_log(
             weights = {
                 "w_delay": 10.0,
                 "w_shift": 1.0,
-                "w_switch": 5.0
+                "w_switch": 5.0,
+                "use_two_stage": True,
+                "epsilon_solver": None,
+                "kappa_win": None,
+                "kappa_seq": None
             }
             freeze_horizon = 12
             
@@ -584,7 +599,11 @@ def _write_episode_rolling_log(
                 weights = {
                     "w_delay": snapshot.meta_params.w_delay,
                     "w_shift": snapshot.meta_params.w_shift,
-                    "w_switch": snapshot.meta_params.w_switch
+                    "w_switch": snapshot.meta_params.w_switch,
+                    "use_two_stage": snapshot.meta_params.use_two_stage,
+                    "epsilon_solver": snapshot.meta_params.epsilon_solver,
+                    "kappa_win": snapshot.meta_params.kappa_win,
+                    "kappa_seq": snapshot.meta_params.kappa_seq
                 }
                 freeze_horizon = snapshot.meta_params.freeze_horizon
             
@@ -592,13 +611,16 @@ def _write_episode_rolling_log(
             plan_diff = {
                 "num_shifts": snapshot.metrics.num_shifts,
                 "num_switches": snapshot.metrics.num_switches,
+                "num_window_switches": snapshot.metrics.num_window_switches,
+                "num_sequence_switches": snapshot.metrics.num_sequence_switches,
                 "drift": snapshot.metrics.plan_drift
             }
             
             # Drift components
             drift_components = {
-                "time_drift": snapshot.metrics.time_drift if hasattr(snapshot.metrics, 'time_drift') else 0.0,
-                "pad_drift": snapshot.metrics.pad_drift if hasattr(snapshot.metrics, 'pad_drift') else 0.0
+                "time_drift": snapshot.metrics.avg_time_shift_slots,
+                "window_switches": snapshot.metrics.num_window_switches,
+                "sequence_switches": snapshot.metrics.num_sequence_switches
             }
             
             # 构建日志条目
@@ -653,11 +675,8 @@ def grid_search_tuning(
 
     param_grid = list(itertools.product(
         freeze_slots,
-        exp_config.w_delay_values,
-        exp_config.w_shift_values,
-        exp_config.w_switch_values
+        exp_config.epsilon_solver_values,
     ))
-
     def _evaluate_policy(policy_name: str, policy_params: Dict[str, Any]) -> Dict[str, float]:
         tasks = [
             (seed, level, policy_name, policy_params, "train", exp_config.solver_timeout_s, None, None)
@@ -738,7 +757,7 @@ def grid_search_tuning(
         }
 
     if verbose:
-        print(f"Param combos: {len(param_grid)}")
+        print(f"Param combos: {len(param_grid)} (freeze?epsilon_solver)")
         print(f"Train episodes: {len(train_assignments)}")
         print(f"Max workers: {exp_config.max_workers}")
         print(f"Total tasks: {len(param_grid) * len(train_assignments)}")
@@ -788,15 +807,19 @@ def grid_search_tuning(
 
     total_combos = len(param_grid)
 
-    for combo_idx, (freeze_h, w_d, w_s, w_sw) in enumerate(param_grid):
+    for combo_idx, (freeze_h, eps_s) in enumerate(param_grid):
         if verbose:
-            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, w_delay={w_d}, w_shift={w_s}, w_switch={w_sw}")
+            print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, epsilon_solver={eps_s}")
 
         policy_params = {
-            "w_delay": w_d,
-            "w_shift": w_s,
-            "w_switch": w_sw,
-            "freeze_horizon": freeze_h
+            "w_delay": 10.0,
+            "w_shift": 1.0,
+            "w_switch": 5.0,
+            "freeze_horizon": freeze_h,
+            "use_two_stage": True,
+            "epsilon_solver": eps_s,
+            "kappa_win": exp_config.kappa_win,
+            "kappa_seq": exp_config.kappa_seq
         }
 
         stats = _evaluate_policy("fixed", policy_params)
@@ -829,9 +852,7 @@ def grid_search_tuning(
 
         result = TuningResult(
             freeze_horizon_slots=freeze_h,
-            w_delay=w_d,
-            w_shift=w_s,
-            w_switch=w_sw,
+            epsilon_solver=eps_s,
             avg_delay=stats["avg_delay"],
             avg_drift=stats["avg_drift"],
             avg_time_deviation_min=stats["avg_time_deviation_min"],
@@ -869,10 +890,14 @@ def grid_search_tuning(
                 best_drift = stats["avg_drift"]
                 best_delay = stats["avg_delay"]
                 best_params = {
-                    "w_delay": w_d,
-                    "w_shift": w_s,
-                    "w_switch": w_sw,
+                    "w_delay": 10.0,
+                    "w_shift": 1.0,
+                    "w_switch": 5.0,
                     "freeze_horizon": freeze_h,
+                    "use_two_stage": True,
+                    "epsilon_solver": eps_s,
+                    "kappa_win": exp_config.kappa_win,
+                    "kappa_seq": exp_config.kappa_seq,
                     "epsilon_metric": exp_config.epsilon_metric,
                     "epsilon_relative": exp_config.epsilon_relative,
                     "epsilon_value": exp_config.epsilon_value,
@@ -887,10 +912,14 @@ def grid_search_tuning(
                 best_drift = stats["avg_drift"]
                 best_delay = stats["avg_delay"]
                 best_params = {
-                    "w_delay": w_d,
-                    "w_shift": w_s,
-                    "w_switch": w_sw,
+                    "w_delay": 10.0,
+                    "w_shift": 1.0,
+                    "w_switch": 5.0,
                     "freeze_horizon": freeze_h,
+                    "use_two_stage": True,
+                    "epsilon_solver": eps_s,
+                    "kappa_win": exp_config.kappa_win,
+                    "kappa_seq": exp_config.kappa_seq,
                     "epsilon_metric": exp_config.epsilon_metric,
                     "epsilon_relative": exp_config.epsilon_relative,
                     "epsilon_value": exp_config.epsilon_value,
@@ -911,12 +940,10 @@ def grid_search_tuning(
         at_boundary = []
         if best_params.get("freeze_horizon") == max(freeze_slots):
             at_boundary.append("freeze_horizon (max)")
-        if best_params.get("w_delay") == max(exp_config.w_delay_values):
-            at_boundary.append("w_delay (max)")
-        if best_params.get("w_shift") == max(exp_config.w_shift_values):
-            at_boundary.append("w_shift (max)")
-        if best_params.get("w_switch") == max(exp_config.w_switch_values):
-            at_boundary.append("w_switch (max)")
+        if best_params.get("epsilon_solver") == max(exp_config.epsilon_solver_values):
+            at_boundary.append("epsilon_solver (max)")
+        if best_params.get("epsilon_solver") == min(exp_config.epsilon_solver_values):
+            at_boundary.append("epsilon_solver (min)")
         
         if at_boundary:
             print(f"\n⚠️  WARNING: 最优参数触及网格边界: {', '.join(at_boundary)}")
@@ -1016,7 +1043,6 @@ def run_evaluation(
                         all_records.append(record)
                     except Exception as e:
                         logger.error(f"Error: seed={seed}, policy={policy_name}: {e}")
-        # ???????
                         all_records.append(_create_failed_record(
                             seed, level, policy_name, dataset
                         ))
@@ -1083,6 +1109,7 @@ def _create_failed_record(
         on_time_rate=0.0, avg_delay=float('inf'), max_delay=0,
         weighted_tardiness=0.0, resource_utilization=0.0,
         episode_drift=0.0, total_shifts=0, total_switches=0,
+        total_window_switches=0, total_sequence_switches=0,
         num_replans=0, num_forced_replans=0,
         avg_solve_time_ms=0.0, total_runtime_s=0.0,
         avg_time_deviation_min=0.0,
@@ -1112,7 +1139,7 @@ def save_episode_results(records: List[EpisodeMetricsRecord], filepath: str):
         "seed", "disturbance_level", "policy_name", "dataset",
         "completed", "total", "on_time_rate", "avg_delay", "max_delay", "weighted_tardiness", "resource_utilization",
         "util_r_pad",
-        "episode_drift", "total_shifts", "total_switches",
+        "episode_drift", "total_shifts", "total_switches", "total_window_switches", "total_sequence_switches",
         "avg_time_deviation_min", "total_resource_switches", "makespan_cmax",
         "feasible_rate", "forced_replan_rate", "avg_frozen", "avg_num_tasks_scheduled",
         "num_replans", "num_forced_replans", "avg_solve_time_ms", "total_runtime_s",
@@ -1138,7 +1165,7 @@ def save_tuning_results(results: List[TuningResult], filepath: str):
     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
     
     fieldnames = [
-        "freeze_horizon_slots", "w_delay", "w_shift", "w_switch",
+        "freeze_horizon_slots", "epsilon_solver",
         "avg_delay", "avg_drift", "avg_time_deviation_min",
         "avg_forced_replan_rate", "avg_feasible_rate",
         "delay_ratio", "drift_ratio", "time_dev_ratio", "forced_replan_ratio",
@@ -1678,6 +1705,8 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 episode_drift=float(row['episode_drift']),
                 total_shifts=int(row['total_shifts']),
                 total_switches=int(row['total_switches']),
+                total_window_switches=int(row.get('total_window_switches', 0)),
+                total_sequence_switches=int(row.get('total_sequence_switches', 0)),
                 num_replans=int(row['num_replans']),
                 num_forced_replans=int(row['num_forced_replans']),
                 avg_solve_time_ms=float(row['avg_solve_time_ms']),
@@ -1689,7 +1718,6 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 forced_replan_rate=float(row.get('forced_replan_rate', 0.0)),
                 avg_frozen=float(row.get('avg_frozen', 0.0)),
                 avg_num_tasks_scheduled=float(row.get('avg_num_tasks_scheduled', 0.0)),
-                # LLM ???????????????
                 llm_calls=int(row.get('llm_calls', 0)),
                 llm_time_total_ms=int(row.get('llm_time_total_ms', 0)),
                 llm_latency_total_ms=int(row.get('llm_latency_total_ms', 0)),
@@ -1883,9 +1911,7 @@ def main():
     # 快速模式下减少调参组合
     if args.quick:
         exp_config.freeze_horizon_hours = [2, 4, 6]
-        exp_config.w_delay_values = [10.0, 12.0]
-        exp_config.w_shift_values = [0.6, 1.0]
-        exp_config.w_switch_values = [10, 20]
+        exp_config.epsilon_solver_values = [0.0, 0.05, 0.10]
         print("  调参网格缩减为 3×2×2×2=24 组合")
     
     # 根据模式运行

@@ -153,7 +153,7 @@ class GreedyPolicy(BasePolicy):
         return None, plan
 
 
-def _greedy_plan_ops(
+    def _greedy_plan_ops(
         self,
         state: Any,
         now: int,
