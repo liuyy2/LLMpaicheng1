@@ -31,11 +31,15 @@ class NoFreezePolicy(BasePolicy):
     
     def __init__(
         self,
-        w_delay: float = 10.0,
-        w_shift: float = 0.2,      # 较低的 shift 惩罚
-        w_switch: float = 1.0,     # 较低的 switch 惩罚
+        w_delay: float = 1.0,
+        w_shift: float = 0.0,      # 较低的 shift 惩罚
+        w_switch: float = 0.0,     # 较低的 switch 惩罚
         freeze_horizon: int = 0,   # 无冻结
-        policy_name: str = "nofreeze"
+        policy_name: str = "nofreeze",
+        use_two_stage: Optional[bool] = True,
+        epsilon_solver: Optional[float] = None,
+        kappa_win: Optional[float] = None,
+        kappa_seq: Optional[float] = None
     ):
         """
         Args:
@@ -50,6 +54,10 @@ class NoFreezePolicy(BasePolicy):
         self._w_switch = w_switch
         self._freeze_horizon = freeze_horizon
         self._policy_name = policy_name
+        self._use_two_stage = use_two_stage
+        self._epsilon_solver = epsilon_solver
+        self._kappa_win = kappa_win
+        self._kappa_seq = kappa_seq
         
         # 统计
         self._call_count = 0
@@ -89,7 +97,11 @@ class NoFreezePolicy(BasePolicy):
             w_delay=self._w_delay,
             w_shift=self._w_shift,
             w_switch=self._w_switch,
-            freeze_horizon=self._freeze_horizon
+            freeze_horizon=self._freeze_horizon,
+            use_two_stage=self._use_two_stage,
+            epsilon_solver=self._epsilon_solver,
+            kappa_win=self._kappa_win,
+            kappa_seq=self._kappa_seq
         ), None
     
     def reset(self) -> None:
@@ -122,7 +134,7 @@ class MinimalFreezePolicy(BasePolicy):
     
     def __init__(
         self,
-        w_delay: float = 10.0,
+        w_delay: float = 1.0,
         w_shift: float = 0.5,
         w_switch: float = 2.0,
         freeze_horizon: int = 2,   # 极短冻结（20分钟）
@@ -151,7 +163,11 @@ class MinimalFreezePolicy(BasePolicy):
             w_delay=self._w_delay,
             w_shift=self._w_shift,
             w_switch=self._w_switch,
-            freeze_horizon=self._freeze_horizon
+            freeze_horizon=self._freeze_horizon,
+            use_two_stage=self._use_two_stage,
+            epsilon_solver=self._epsilon_solver,
+            kappa_win=self._kappa_win,
+            kappa_seq=self._kappa_seq
         ), None
     
     def reset(self) -> None:

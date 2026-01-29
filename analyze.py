@@ -148,7 +148,7 @@ def load_episode_results(filepath: str) -> List[EpisodeRecord]:
 
 
 def load_tuning_results(filepath: str) -> List[Dict[str, Any]]:
-    """加载调参结果 CSV"""
+    """?????? CSV?????freeze ? epsilon_solver?"""
     results = []
     
     if not os.path.exists(filepath):
@@ -158,16 +158,31 @@ def load_tuning_results(filepath: str) -> List[Dict[str, Any]]:
         reader = csv.DictReader(f)
         for row in reader:
             results.append({
-                "freeze_horizon_slots": int(row['freeze_horizon_slots']),
-                "w_delay": float(row['w_delay']),
-                "w_shift": float(row['w_shift']),
-                "w_switch": float(row['w_switch']),
-                "avg_delay": float(row['avg_delay']),
-                "avg_drift": float(row['avg_drift']),
-                "combined_score": float(row['combined_score'])
+                "freeze_horizon_slots": int(row.get('freeze_horizon_slots', 0)),
+                "epsilon_solver": float(row.get('epsilon_solver', 0.0)),
+                "avg_delay": float(row.get('avg_delay', 0.0)),
+                "avg_drift": float(row.get('avg_drift', 0.0)),
+                "avg_time_deviation_min": float(row.get('avg_time_deviation_min', 0.0)),
+                "avg_forced_replan_rate": float(row.get('avg_forced_replan_rate', 0.0)),
+                "avg_feasible_rate": float(row.get('avg_feasible_rate', 0.0)),
+                "delay_ratio": float(row.get('delay_ratio', 0.0)),
+                "drift_ratio": float(row.get('drift_ratio', 0.0)),
+                "time_dev_ratio": float(row.get('time_dev_ratio', 0.0)),
+                "forced_replan_ratio": float(row.get('forced_replan_ratio', 0.0)),
+                "delay_ok": row.get('delay_ok', 'False') == 'True',
+                "feasible_ok": row.get('feasible_ok', 'False') == 'True',
+                "combined_score": float(row.get('combined_score', 0.0)),
+                "epsilon_metric": row.get('epsilon_metric', ''),
+                "epsilon_threshold": float(row.get('epsilon_threshold', 0.0)),
+                "epsilon_value": float(row.get('epsilon_value', 0.0)),
+                "epsilon_ok": row.get('epsilon_ok', 'False') == 'True',
+                "epsilon_violation": float(row.get('epsilon_violation', 0.0)),
+                "num_episodes": int(row.get('num_episodes', 0)),
+                "avg_solve_time_ms": float(row.get('avg_solve_time_ms', 0.0))
             })
     
     return results
+
 
 
 # ============================================================================
@@ -274,7 +289,7 @@ def compute_summary_stats(
         groups[key].append(rec)
     
     # 基线策略优先级，用于归一化综合成本
-    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
+    baseline_priority = ["fixed_default", "fixed_tuned"]
     baseline_means: Dict[str, Tuple[float, float]] = {}
     datasets = sorted({k[0] for k in groups.keys()})
     for dataset in datasets:
@@ -408,10 +423,9 @@ def compute_summary_stats(
 # ============================================================================
 
 POLICY_STYLES = {
-    "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Fixed (Tuned)"},
-    "fixed_default": {"color": "#3498db", "marker": "s", "label": "Fixed (Default)"},
-    "nofreeze": {"color": "#e74c3c", "marker": "^", "label": "NoFreeze"},
-    "greedy": {"color": "#9b59b6", "marker": "D", "label": "Priority Rule (EDD)"},
+    "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Fixed-Balanced"},
+    "fixed_default": {"color": "#3498db", "marker": "s", "label": "Delay-Only"},
+    "nofreeze": {"color": "#e74c3c", "marker": "^", "label": "No-Freeze"},
     "mockllm": {"color": "#f39c12", "marker": "v", "label": "MockLLM"},
     "llm_real": {"color": "#1abc9c", "marker": "P", "label": "LLM (Real)"},
     "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"}
@@ -975,17 +989,20 @@ def plot_tuning_heatmap(
     tuning_results: List[Dict[str, Any]],
     output_path: str
 ):
-    """绘制调参结果热力图"""
+    """??????????freeze ? epsilon_solver?"""
     if not tuning_results:
         print("No tuning results to plot")
         return
+    if any("epsilon_solver" not in r or "freeze_horizon_slots" not in r for r in tuning_results):
+        print("Skip tuning heatmap: missing epsilon_solver/freeze_horizon_slots")
+        return
     
     freeze_values = sorted(set(r["freeze_horizon_slots"] for r in tuning_results))
-    wshift_values = sorted(set(r["w_shift"] for r in tuning_results))
+    eps_values = sorted(set(r["epsilon_solver"] for r in tuning_results))
     
     matrix = {}
     for r in tuning_results:
-        key = (r["freeze_horizon_slots"], r["w_shift"])
+        key = (r["freeze_horizon_slots"], r["epsilon_solver"])
         if key not in matrix:
             matrix[key] = []
         matrix[key].append(r["combined_score"])
@@ -993,8 +1010,8 @@ def plot_tuning_heatmap(
     data = []
     for freeze in freeze_values:
         row = []
-        for wshift in wshift_values:
-            key = (freeze, wshift)
+        for eps in eps_values:
+            key = (freeze, eps)
             vals = matrix.get(key, [0])
             row.append(mean(vals))
         data.append(row)
@@ -1003,19 +1020,19 @@ def plot_tuning_heatmap(
     
     im = ax.imshow(data, cmap='RdYlGn_r', aspect='auto')
     
-    ax.set_xticks(range(len(wshift_values)))
-    ax.set_xticklabels([f"{v}" for v in wshift_values])
+    ax.set_xticks(range(len(eps_values)))
+    ax.set_xticklabels([f"{v}" for v in eps_values])
     ax.set_yticks(range(len(freeze_values)))
     ax.set_yticklabels([f"{v}" for v in freeze_values])
     
-    ax.set_xlabel("w_shift", fontsize=12)
+    ax.set_xlabel("epsilon_solver", fontsize=12)
     ax.set_ylabel("freeze_horizon (slots)", fontsize=12)
     ax.set_title("Tuning: Combined Score (lower is better)", fontsize=14)
     
     plt.colorbar(im, ax=ax, label="Combined Score")
     
     for i in range(len(freeze_values)):
-        for j in range(len(wshift_values)):
+        for j in range(len(eps_values)):
             ax.text(j, i, f'{data[i][j]:.1f}',
                     ha='center', va='center', fontsize=8,
                     color='white' if data[i][j] > mean([mean(row) for row in data]) else 'black')
@@ -1024,12 +1041,7 @@ def plot_tuning_heatmap(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"保存图表: {output_path}")
-
-
-# ============================================================================
-# Summary CSV 输出
-# ============================================================================
+    print(f"????: {output_path}")
 
 def save_summary_csv(
     stats: Dict[Tuple[str, str], Dict[str, Any]],
@@ -1124,7 +1136,7 @@ def save_enhanced_summary_with_tests(
     for rec in test_records:
         by_seed[rec.seed][rec.policy_name] = rec
     
-    baseline_priority = ["fixed_default", "fixed_tuned", "fixed"]
+    baseline_priority = ["fixed_default", "fixed_tuned"]
     baseline = "fixed_tuned"
     baseline_recs = None
     for name in baseline_priority:
@@ -1643,12 +1655,17 @@ def run_analysis(
         dataset=primary_dataset
     )
     
-    # 调参热力图
-    if tuning_results:
+    # ??????? tuning_results ????
+    can_plot_tuning = bool(tuning_results) and all(
+        "epsilon_solver" in r and "freeze_horizon_slots" in r for r in tuning_results
+    )
+    if can_plot_tuning:
         plot_tuning_heatmap(
             tuning_results,
             os.path.join(output_dir, "tuning_heatmap.png")
         )
+    else:
+        print("Skip tuning heatmap: tuning_results empty or missing fields")
 
     # Feature buckets and Gantt chart (if logs exist)
     save_feature_bucket_table(input_dir, os.path.join(output_dir, "feature_bucket_table.csv"))
@@ -1676,7 +1693,7 @@ def run_analysis(
     print(f"  - {output_dir}/policy_comparison_total_resource_switches.png")
     print(f"  - {output_dir}/delay_by_disturbance.png")
     print(f"  - {output_dir}/drift_by_disturbance.png")
-    if tuning_results:
+    if can_plot_tuning:
         print(f"  - {output_dir}/tuning_heatmap.png")
     if "llm_real" in available_policies:
         print(f"  - {output_dir}/reliability_report.md")

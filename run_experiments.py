@@ -37,7 +37,7 @@ from config import Config, DEFAULT_CONFIG
 from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
-    FixedWeightPolicy, NoFreezePolicy, GreedyPolicy, MockLLMPolicy,
+    FixedWeightPolicy, MockLLMPolicy,
     create_policy, MetaParams
 )
 
@@ -81,7 +81,7 @@ class ExperimentConfig:
     
     # 调参网格（扩展上界，保持4×4×4×4=256组合）
         # Tuning grid (two-stage)
-    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 4, 8, 16])
+    freeze_horizon_hours: List[float] = field(default_factory=lambda: [0, 4, 8, 16, 24])
     epsilon_solver_values: List[float] = field(default_factory=lambda: [0.0, 0.02, 0.05, 0.10])
     kappa_win: float = 12.0
     kappa_seq: float = 6.0
@@ -123,12 +123,9 @@ class ExperimentConfig:
 
 
 BASELINE_FIXED_DEFAULT = {
-    "w_delay": 10.0,
-    "w_shift": 1.0,
-    "w_switch": 5.0,
-    "freeze_horizon": 12,
-    "use_two_stage": True,
-    "epsilon_solver": 0.05,
+    "freeze_horizon": 0,
+    "use_two_stage": False,
+    "epsilon_solver": None,
     "kappa_win": 12.0,
     "kappa_seq": 6.0
 }
@@ -255,7 +252,7 @@ class RollingLogEntry:
     t_now: int
     trigger_reason: str            # "scheduled" | "forced_replan" | "initial"
     freeze_horizon: int
-    weights: Dict[str, float]      # {"w_delay": ..., "w_shift": ..., "w_switch": ...}
+    weights: Dict[str, float]      # {"use_two_stage": ..., "epsilon_solver": ..., "kappa_win": ..., "kappa_seq": ...}
     plan_diff: Dict[str, Any]      # {"num_shifts": ..., "num_switches": ..., "drift": ...}
     drift_components: Dict[str, float]  # {"time_drift": ..., "pad_drift": ...}
     solve_status: str
@@ -377,22 +374,45 @@ def run_single_episode(
     policy = None
     llm_stats = None  # 用于记录 LLM 统计
     
-    if policy_name in ("fixed", "fixed_tuned", "fixed_default"):
+    if policy_name == "fixed_default":
+        # Delay-Only baseline: Stage 1 only, no future freeze
         policy = FixedWeightPolicy(
-            w_delay=policy_params.get("w_delay", 10.0),
-            w_shift=policy_params.get("w_shift", 1.0),
-            w_switch=policy_params.get("w_switch", 5.0),
+            w_delay=1.0,
+            w_shift=0.0,
+            w_switch=0.0,
+            freeze_horizon=policy_params.get("freeze_horizon", 0),
+            policy_name=policy_name,
+            use_two_stage=False,
+            epsilon_solver=None,
+            kappa_win=policy_params.get("kappa_win"),
+            kappa_seq=policy_params.get("kappa_seq")
+        )
+    elif policy_name in ("fixed", "fixed_tuned"):
+        # Fixed-Balanced baseline: two-stage with fixed (freeze, epsilon)
+        policy = FixedWeightPolicy(
+            w_delay=1.0,
+            w_shift=0.0,
+            w_switch=0.0,
             freeze_horizon=policy_params.get("freeze_horizon", 12),
             policy_name=policy_name,
-            use_two_stage=policy_params.get("use_two_stage", True),
+            use_two_stage=True,
             epsilon_solver=policy_params.get("epsilon_solver"),
             kappa_win=policy_params.get("kappa_win"),
             kappa_seq=policy_params.get("kappa_seq")
         )
     elif policy_name == "nofreeze":
-        policy = NoFreezePolicy()
-    elif policy_name == "greedy":
-        policy = GreedyPolicy(sort_by="due", policy_name="greedy")
+        # No-freeze ablation: same epsilon as tuned, freeze=0
+        policy = FixedWeightPolicy(
+            w_delay=1.0,
+            w_shift=0.0,
+            w_switch=0.0,
+            freeze_horizon=0,
+            policy_name=policy_name,
+            use_two_stage=True,
+            epsilon_solver=policy_params.get("epsilon_solver"),
+            kappa_win=policy_params.get("kappa_win"),
+            kappa_seq=policy_params.get("kappa_seq")
+        )
     elif policy_name == "mockllm":
         log_dir = None
         if output_dir:
@@ -585,10 +605,7 @@ def _write_episode_rolling_log(
             
             # 获取权重
             weights = {
-                "w_delay": 10.0,
-                "w_shift": 1.0,
-                "w_switch": 5.0,
-                "use_two_stage": True,
+                "use_two_stage": None,
                 "epsilon_solver": None,
                 "kappa_win": None,
                 "kappa_seq": None
@@ -597,9 +614,6 @@ def _write_episode_rolling_log(
             
             if snapshot.meta_params:
                 weights = {
-                    "w_delay": snapshot.meta_params.w_delay,
-                    "w_shift": snapshot.meta_params.w_shift,
-                    "w_switch": snapshot.meta_params.w_switch,
                     "use_two_stage": snapshot.meta_params.use_two_stage,
                     "epsilon_solver": snapshot.meta_params.epsilon_solver,
                     "kappa_win": snapshot.meta_params.kappa_win,
@@ -762,7 +776,7 @@ def grid_search_tuning(
         print(f"Max workers: {exp_config.max_workers}")
         print(f"Total tasks: {len(param_grid) * len(train_assignments)}")
 
-    baseline_fixed = _evaluate_policy("fixed", BASELINE_FIXED_DEFAULT)
+    baseline_fixed = _evaluate_policy("fixed_default", BASELINE_FIXED_DEFAULT)
 
     eps = 1e-9
     base_delay = max(eps, baseline_fixed["avg_delay"])
@@ -790,7 +804,7 @@ def grid_search_tuning(
         w_delay, w_drift, w_time, w_forced = [w / w_sum for w in (w_delay, w_drift, w_time, w_forced)]
 
     if verbose:
-        print("\nBaseline (fixed_default) train stats:")
+        print("\nBaseline (Delay-Only) train stats:")
         print(f"  delay={baseline_fixed['avg_delay']:.3f}, drift={baseline_fixed['avg_drift']:.5f}, time_dev={baseline_fixed['avg_time_deviation_min']:.3f}, forced={baseline_fixed['avg_forced_replan_rate']:.3f}, feasible={baseline_fixed['avg_feasible_rate']:.3f}")
         print("Baseline thresholds:")
         print(f"  delay<= {base_delay * (1 + exp_config.tuning_delay_tolerance):.3f} (tol={exp_config.tuning_delay_tolerance*100:.1f}%)")
@@ -812,9 +826,6 @@ def grid_search_tuning(
             print(f"\n[{combo_idx+1}/{total_combos}] freeze={freeze_h}, epsilon_solver={eps_s}")
 
         policy_params = {
-            "w_delay": 10.0,
-            "w_shift": 1.0,
-            "w_switch": 5.0,
             "freeze_horizon": freeze_h,
             "use_two_stage": True,
             "epsilon_solver": eps_s,
@@ -890,9 +901,6 @@ def grid_search_tuning(
                 best_drift = stats["avg_drift"]
                 best_delay = stats["avg_delay"]
                 best_params = {
-                    "w_delay": 10.0,
-                    "w_shift": 1.0,
-                    "w_switch": 5.0,
                     "freeze_horizon": freeze_h,
                     "use_two_stage": True,
                     "epsilon_solver": eps_s,
@@ -912,9 +920,6 @@ def grid_search_tuning(
                 best_drift = stats["avg_drift"]
                 best_delay = stats["avg_delay"]
                 best_params = {
-                    "w_delay": 10.0,
-                    "w_shift": 1.0,
-                    "w_switch": 5.0,
                     "freeze_horizon": freeze_h,
                     "use_two_stage": True,
                     "epsilon_solver": eps_s,
@@ -1401,11 +1406,17 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     save_best_params(best_params, best_params_path)
     
     # 3. 定义所有策略
+    nofreeze_params = {
+        "freeze_horizon": 0,
+        "use_two_stage": True,
+        "epsilon_solver": best_params.get("epsilon_solver"),
+        "kappa_win": best_params.get("kappa_win", exp_config.kappa_win),
+        "kappa_seq": best_params.get("kappa_seq", exp_config.kappa_seq)
+    }
     policies = {
-        "fixed_tuned": best_params,  # 调优后的固定策略
+        "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": {},
-        "greedy": {},
+        "nofreeze": nofreeze_params
     }
     
     # 4. 在测试集上评估
@@ -1500,11 +1511,17 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
     save_best_params(best_params, best_params_path)
     
     # 定义所有策略（使用最优参数）
+    nofreeze_params = {
+        "freeze_horizon": 0,
+        "use_two_stage": True,
+        "epsilon_solver": best_params.get("epsilon_solver"),
+        "kappa_win": best_params.get("kappa_win", exp_config.kappa_win),
+        "kappa_seq": best_params.get("kappa_seq", exp_config.kappa_seq)
+    }
     policies = {
         "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": {},
-        "greedy": {},
+        "nofreeze": nofreeze_params
     }
     
     # 在训练集上评估所有策略（完整记录）
@@ -1601,11 +1618,18 @@ def run_test_only(
     save_seed_manifest(train_assignments, test_assignments, seed_manifest_path)
 
 
+    nofreeze_params = {
+        "freeze_horizon": 0,
+        "use_two_stage": True,
+        "epsilon_solver": best_params.get("epsilon_solver"),
+        "kappa_win": best_params.get("kappa_win", exp_config.kappa_win),
+        "kappa_seq": best_params.get("kappa_seq", exp_config.kappa_seq)
+    }
+
     all_policies = {
         "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": {},
-        "greedy": {},
+        "nofreeze": nofreeze_params,
         "mockllm": {},
         "llm_real": {}  # LLM params from exp_config
     }
@@ -1821,7 +1845,7 @@ def main():
     parser.add_argument(
         "--policy", type=str, default=None,
         help="要评估的策略，逗号分隔 (default: 全部)。"
-             "可选: fixed_tuned, fixed_default, nofreeze, greedy, mockllm, llm_real"
+             "可选: fixed_tuned, fixed_default, nofreeze, mockllm, llm_real"
     )
     
     # ========== LLM 参数 ==========
@@ -1871,7 +1895,7 @@ def main():
         print("快速测试模式: train=9, test=9")
     
     # 解析策略列表
-    all_baseline_policies = ["fixed_tuned", "fixed_default", "nofreeze", "greedy"]
+    all_baseline_policies = ["fixed_tuned", "fixed_default", "nofreeze"]
     if args.policy:
         selected_policies = [p.strip() for p in args.policy.split(",")]
     else:

@@ -15,7 +15,6 @@ from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
     FixedWeightPolicy,
     NoFreezePolicy,
-    GreedyPolicy,
     MockLLMPolicy,
     LLMInterfacePolicy,
     create_policy
@@ -79,10 +78,6 @@ def run_policy_comparison(
         NoFreezePolicy(
             w_delay=10.0, w_shift=0.2, w_switch=1.0,
             freeze_horizon=0, policy_name="nofreeze"
-        ),
-        GreedyPolicy(
-            sort_by="due", prefer_pad_switch=True,
-            policy_name="greedy"
         ),
         MockLLMPolicy(
             policy_name="mockllm",

@@ -4,7 +4,6 @@
 策略类型：
 - FixedWeightPolicy (B1): 固定权重 + 固定冻结
 - NoFreezePolicy (B2): 无冻结 + 低稳定惩罚
-- GreedyPolicy (B3): 贪心策略，不使用 CP-SAT
 - MockLLMPolicy (L1): 模拟 LLM，根据特征确定性输出元参数
 
 所有策略都实现 BasePolicy 接口，可被 simulator.py 调用
@@ -13,7 +12,6 @@
 from policies.base import BasePolicy, MetaParams
 from policies.policy_fixed import FixedWeightPolicy
 from policies.policy_nofreeze import NoFreezePolicy, MinimalFreezePolicy
-from policies.policy_greedy import GreedyPolicy, EDFGreedyPolicy, WindowGreedyPolicy
 from policies.policy_llm_meta import (
     MockLLMPolicy,
     LLMInterfacePolicy,
@@ -44,9 +42,6 @@ __all__ = [
     "MinimalFreezePolicy",
     
     # 贪心策略
-    "GreedyPolicy",
-    "EDFGreedyPolicy",
-    "WindowGreedyPolicy",
     
     # LLM 策略
     "MockLLMPolicy",
@@ -76,7 +71,6 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
             - "fixed_default": FixedWeightPolicy (默认参数)
             - "fixed_tuned": FixedWeightPolicy (可传入调优参数)
             - "nofreeze": NoFreezePolicy
-            - "greedy": GreedyPolicy (EDF)
             - "mockllm": MockLLMPolicy
         **kwargs: 传递给策略构造函数的参数
     
@@ -96,8 +90,6 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
         return FixedWeightPolicy(policy_name="fixed_tuned", **kwargs)
     elif name_lower == "nofreeze":
         return NoFreezePolicy(policy_name="nofreeze", **kwargs)
-    elif name_lower == "greedy":
-        return GreedyPolicy(policy_name="greedy", sort_by="due", **kwargs)
     elif name_lower == "mockllm":
         return MockLLMPolicy(policy_name="mockllm", **kwargs)
     else:
@@ -105,4 +97,4 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
 
 
 # 获取所有可用策略名称
-AVAILABLE_POLICIES = ["fixed", "fixed_default", "fixed_tuned", "nofreeze", "greedy", "mockllm"]
+AVAILABLE_POLICIES = ["fixed", "fixed_default", "fixed_tuned", "nofreeze", "mockllm"]
