@@ -1,0 +1,11 @@
+﻿# Core solver and simulation
+ortools
+
+# Plotting/analysis
+matplotlib
+
+# LLM integration (optional for llm_real/llm_meta policies)
+openai>=1.0.0
+
+# Testing
+pytest

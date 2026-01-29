@@ -419,6 +419,403 @@ def compute_summary_stats(
 
 
 # ============================================================================
+# Baseline-only analysis helpers (no LLM required)
+# ============================================================================
+
+def _to_bool(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes")
+
+
+def _parse_episode_dir_name(name: str) -> Optional[Tuple[int, str]]:
+    if not name.startswith("episode_"):
+        return None
+    rest = name[len("episode_"):]
+    parts = rest.split("_", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        seed = int(parts[0])
+    except ValueError:
+        return None
+    policy = parts[1]
+    return seed, policy
+
+
+def build_record_index(
+    records: List[EpisodeRecord],
+    dataset: Optional[str] = None
+) -> Dict[Tuple[int, str], EpisodeRecord]:
+    index = {}
+    for rec in records:
+        if dataset and rec.dataset != dataset:
+            continue
+        index[(rec.seed, rec.policy_name)] = rec
+    return index
+
+
+def load_metrics_per_roll(metrics_path: str) -> List[Dict[str, Any]]:
+    rows = []
+    with open(metrics_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append({
+                "t": int(float(row.get("t", 0))),
+                "plan_drift": float(row.get("plan_drift", 0.0)),
+                "num_shifts": int(float(row.get("num_shifts", 0))),
+                "num_switches": int(float(row.get("num_switches", 0))),
+                "solve_time_ms": float(row.get("solve_time_ms", 0.0)),
+                "is_feasible": _to_bool(row.get("is_feasible", True)),
+                "forced_replan": _to_bool(row.get("forced_replan", False))
+            })
+    return rows
+
+
+def collect_roll_metrics(
+    logs_dir: str,
+    record_index: Dict[Tuple[int, str], EpisodeRecord]
+) -> List[Dict[str, Any]]:
+    roll_rows: List[Dict[str, Any]] = []
+    if not os.path.isdir(logs_dir):
+        return roll_rows
+
+    for root, _, files in os.walk(logs_dir):
+        if "metrics_per_roll.csv" not in files:
+            continue
+        episode_dir = os.path.basename(root)
+        parsed = _parse_episode_dir_name(episode_dir)
+        if not parsed:
+            continue
+        seed, policy = parsed
+        rec = record_index.get((seed, policy))
+        if not rec:
+            continue
+
+        metrics_path = os.path.join(root, "metrics_per_roll.csv")
+        for row in load_metrics_per_roll(metrics_path):
+            roll_rows.append({
+                "seed": seed,
+                "policy_name": policy,
+                "disturbance_level": rec.disturbance_level,
+                "t": row["t"],
+                "plan_drift": row["plan_drift"],
+                "num_shifts": row["num_shifts"],
+                "num_switches": row["num_switches"],
+                "solve_time_ms": row["solve_time_ms"],
+                "is_feasible": row["is_feasible"],
+                "forced_replan": row["forced_replan"]
+            })
+
+    return roll_rows
+
+
+def compute_roll_stats(
+    roll_rows: List[Dict[str, Any]],
+    policies: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in roll_rows:
+        if policies and row["policy_name"] not in policies:
+            continue
+        key = (row["disturbance_level"], row["policy_name"])
+        groups[key].append(row)
+
+    rows = []
+    for (level, policy), items in sorted(groups.items()):
+        feasible_rate = mean([1.0 if r["is_feasible"] else 0.0 for r in items])
+        forced_rate = mean([1.0 if r["forced_replan"] else 0.0 for r in items])
+        solve_times = [r["solve_time_ms"] for r in items]
+        rows.append({
+            "disturbance_level": level,
+            "policy_name": policy,
+            "n_rolls": len(items),
+            "feasible_rate": round(feasible_rate, 4),
+            "forced_replan_rate": round(forced_rate, 4),
+            "solve_time_mean_ms": round(mean(solve_times), 2),
+            "solve_time_p95_ms": round(percentile(solve_times, 95), 2)
+        })
+    return rows
+
+
+def compute_main_table_by_disturbance(
+    records: List[EpisodeRecord],
+    dataset: str,
+    delay_budget: Optional[float],
+    policies: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    groups: Dict[Tuple[str, str], List[EpisodeRecord]] = defaultdict(list)
+    for rec in records:
+        if rec.dataset != dataset:
+            continue
+        if policies and rec.policy_name not in policies:
+            continue
+        key = (rec.disturbance_level, rec.policy_name)
+        groups[key].append(rec)
+
+    rows = []
+    for (level, policy), recs in sorted(groups.items()):
+        avg_delay_vals = [r.avg_delay for r in recs]
+        max_delay_vals = [r.max_delay for r in recs]
+        drift_vals = [r.episode_drift for r in recs]
+        shifts_vals = [r.total_shifts for r in recs]
+        switches_vals = [r.total_switches for r in recs]
+        feasible_vals = [r.feasible_rate for r in recs]
+        solve_vals = [r.avg_solve_time_ms for r in recs]
+        mean_delay = mean(avg_delay_vals)
+
+        rows.append({
+            "disturbance_level": level,
+            "policy_name": policy,
+            "n": len(recs),
+            "avg_delay_mean": round(mean_delay, 3),
+            "avg_delay_std": round(std(avg_delay_vals), 3),
+            "max_delay_mean": round(mean(max_delay_vals), 2),
+            "max_delay_std": round(std(max_delay_vals), 2),
+            "drift_mean": round(mean(drift_vals), 4),
+            "drift_std": round(std(drift_vals), 4),
+            "total_shifts_mean": round(mean(shifts_vals), 2),
+            "total_shifts_std": round(std(shifts_vals), 2),
+            "total_switches_mean": round(mean(switches_vals), 2),
+            "total_switches_std": round(std(switches_vals), 2),
+            "feasible_rate_mean": round(mean(feasible_vals), 4),
+            "feasible_rate_std": round(std(feasible_vals), 4),
+            "avg_solve_time_ms_mean": round(mean(solve_vals), 2),
+            "avg_solve_time_ms_std": round(std(solve_vals), 2),
+            "delay_budget": round(delay_budget, 3) if delay_budget is not None else "",
+            "budget_ok": (
+                "True" if delay_budget is not None and mean_delay <= delay_budget else "False"
+            )
+        })
+    return rows
+
+
+def save_main_table_by_disturbance(rows: List[Dict[str, Any]], output_path: str) -> None:
+    if not rows:
+        print("Skip main table: no rows")
+        return
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fieldnames = list(rows[0].keys())
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Saved main table: {output_path}")
+
+
+def compute_delay_budget(
+    records: List[EpisodeRecord],
+    dataset: str,
+    baseline_policy: str,
+    budget_source: str,
+    budget_multiplier: float,
+    budget_value: Optional[float],
+    best_params_path: Optional[str]
+) -> Optional[float]:
+    if budget_source == "manual":
+        return budget_value
+    if budget_source == "best_params" and best_params_path and os.path.exists(best_params_path):
+        try:
+            with open(best_params_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "epsilon_threshold" in data:
+                return float(data["epsilon_threshold"])
+            base = float(data.get("baseline_avg_delay", 0.0))
+            eps = float(data.get("epsilon_value", 0.0))
+            if base > 0:
+                return base * (1 + eps)
+        except Exception:
+            return None
+    if budget_source == "baseline":
+        baseline_delays = [
+            r.avg_delay for r in records
+            if r.dataset == dataset and r.policy_name == baseline_policy
+        ]
+        if not baseline_delays:
+            return None
+        return mean(baseline_delays) * budget_multiplier
+    return None
+
+
+def save_budgeted_best_drift(
+    tuning_results: List[Dict[str, Any]],
+    records: List[EpisodeRecord],
+    dataset: str,
+    delay_budget: Optional[float],
+    baseline_policy: str,
+    output_path: str
+) -> None:
+    if delay_budget is None:
+        print("Skip budgeted best drift: delay budget not available")
+        return
+    baseline_delays = [
+        r.avg_delay for r in records
+        if r.dataset == dataset and r.policy_name == baseline_policy
+    ]
+    baseline_drifts = [
+        r.episode_drift for r in records
+        if r.dataset == dataset and r.policy_name == baseline_policy
+    ]
+    base_delay = mean(baseline_delays) if baseline_delays else 0.0
+    base_drift = mean(baseline_drifts) if baseline_drifts else 0.0
+
+    eligible = [r for r in tuning_results if r.get("avg_delay", 0.0) <= delay_budget]
+    best = None
+    if eligible:
+        best = min(eligible, key=lambda r: r.get("avg_drift", float("inf")))
+
+    row = {
+        "delay_budget": round(delay_budget, 3),
+        "baseline_policy": baseline_policy,
+        "baseline_avg_delay": round(base_delay, 3),
+        "baseline_avg_drift": round(base_drift, 5),
+        "eligible_count": len(eligible)
+    }
+    if best:
+        row.update({
+            "best_avg_delay": round(best.get("avg_delay", 0.0), 3),
+            "best_avg_drift": round(best.get("avg_drift", 0.0), 5),
+            "best_freeze_horizon": best.get("freeze_horizon_slots", ""),
+            "best_epsilon_solver": best.get("epsilon_solver", "")
+        })
+    else:
+        row.update({
+            "best_avg_delay": "",
+            "best_avg_drift": "",
+            "best_freeze_horizon": "",
+            "best_epsilon_solver": ""
+        })
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
+    print(f"Saved budgeted best drift: {output_path}")
+
+
+def save_roll_feasibility_stats(
+    roll_rows: List[Dict[str, Any]],
+    output_path: str,
+    policies: Optional[List[str]] = None
+) -> None:
+    stats = compute_roll_stats(roll_rows, policies=policies)
+    if not stats:
+        print("Skip roll feasibility stats: no roll data")
+        return
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fieldnames = list(stats[0].keys())
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(stats)
+    print(f"Saved roll feasibility stats: {output_path}")
+
+
+def _load_schedule_items(schedule_path: str, max_items: int = 120) -> List[Tuple[str, int, int]]:
+    with open(schedule_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    schedule = data.get("schedule") or data.get("final_schedule") or []
+    items = []
+    for entry in schedule:
+        start = entry.get("start_slot")
+        end = entry.get("end_slot")
+        label = entry.get("op_id") or entry.get("task_id") or entry.get("id")
+        if start is None or end is None or label is None:
+            continue
+        items.append((label, int(start), int(end)))
+    items.sort(key=lambda x: x[1])
+    return items[:max_items]
+
+
+def plot_episode_compare(
+    logs_dir: str,
+    seed: int,
+    policy_a: str,
+    policy_b: str,
+    output_path: str,
+    max_items: int = 120
+) -> None:
+    if not os.path.isdir(logs_dir):
+        print("Skip episode compare: logs dir not found")
+        return
+
+    target_a = f"episode_{seed}_{policy_a}"
+    target_b = f"episode_{seed}_{policy_b}"
+    dir_a = None
+    dir_b = None
+    for root, dirs, _ in os.walk(logs_dir):
+        if target_a in dirs:
+            dir_a = os.path.join(root, target_a)
+        if target_b in dirs:
+            dir_b = os.path.join(root, target_b)
+
+    if not dir_a or not dir_b:
+        print("Skip episode compare: episode dirs not found")
+        return
+
+    schedule_path = os.path.join(dir_a, "final_schedule.json")
+    metrics_a = os.path.join(dir_a, "metrics_per_roll.csv")
+    metrics_b = os.path.join(dir_b, "metrics_per_roll.csv")
+    if not os.path.exists(metrics_a) or not os.path.exists(metrics_b):
+        print("Skip episode compare: missing metrics_per_roll.csv")
+        return
+
+    rows_a = load_metrics_per_roll(metrics_a)
+    rows_b = load_metrics_per_roll(metrics_b)
+    if not rows_a or not rows_b:
+        print("Skip episode compare: empty roll metrics")
+        return
+
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        2, 1, figsize=(12, 8), gridspec_kw={"height_ratios": [2, 1]}
+    )
+
+    if os.path.exists(schedule_path):
+        items = _load_schedule_items(schedule_path, max_items=max_items)
+        labels = [i[0] for i in items]
+        starts = [i[1] for i in items]
+        durations = [max(0, i[2] - i[1]) for i in items]
+        y_positions = range(len(items))
+        ax_top.barh(y_positions, durations, left=starts, color="#3498db", alpha=0.8)
+        ax_top.set_yticks(list(y_positions))
+        ax_top.set_yticklabels(labels, fontsize=7)
+        ax_top.invert_yaxis()
+        ax_top.set_xlabel("Slot")
+        ax_top.set_title(f"Gantt (seed={seed}, policy={policy_a})")
+        ax_top.grid(True, axis="x", alpha=0.3)
+    else:
+        ax_top.axis("off")
+        ax_top.set_title("Gantt not available")
+
+    t_a = [r["t"] for r in rows_a]
+    t_b = [r["t"] for r in rows_b]
+    drift_a = [r["plan_drift"] for r in rows_a]
+    drift_b = [r["plan_drift"] for r in rows_b]
+    shifts_a = [r["num_shifts"] for r in rows_a]
+    shifts_b = [r["num_shifts"] for r in rows_b]
+
+    ax_bottom.plot(t_a, drift_a, color="#2ecc71", label=f"{policy_a} drift")
+    ax_bottom.plot(t_b, drift_b, color="#e74c3c", label=f"{policy_b} drift")
+    ax_bottom.set_xlabel("Rolling step")
+    ax_bottom.set_ylabel("Plan drift")
+    ax_bottom.grid(True, alpha=0.3)
+
+    ax2 = ax_bottom.twinx()
+    ax2.plot(t_a, shifts_a, color="#2ecc71", linestyle="--", label=f"{policy_a} changes")
+    ax2.plot(t_b, shifts_b, color="#e74c3c", linestyle="--", label=f"{policy_b} changes")
+    ax2.set_ylabel("#changes (num_shifts)")
+
+    lines, labels = ax_bottom.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax_bottom.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved episode compare: {output_path}")
+
+
+# ============================================================================
 # 绘图样式配置
 # ============================================================================
 
@@ -1483,7 +1880,17 @@ def run_analysis(
     tuning_lambda: float = 5.0,
     epsilon_metric: str = "avg_delay",
     epsilon_relative: str = "baseline",
-    epsilon_value: float = 0.10
+    epsilon_value: float = 0.10,
+    include_llm: bool = False,
+    policies: Optional[List[str]] = None,
+    logs_dir: Optional[str] = None,
+    budget_source: str = "baseline",
+    budget_multiplier: float = 1.05,
+    budget_value: Optional[float] = None,
+    best_params_path: Optional[str] = None,
+    episode_seed: Optional[int] = None,
+    episode_policy_a: str = "fixed_tuned",
+    episode_policy_b: str = "nofreeze"
 ):
     """
     运行完整分析流程
@@ -1519,7 +1926,26 @@ def run_analysis(
     primary_dataset = "test" if "test" in available_datasets else "train"
     print(f"主数据集: {primary_dataset}")
 
-    epsilon_threshold = compute_epsilon_threshold(
+    if policies is None:
+        policies = ["fixed_default", "fixed_tuned", "nofreeze"]
+    policies = [p for p in policies if p in available_policies]
+    if not policies:
+        policies = sorted(available_policies)
+
+    logs_dir = logs_dir or os.path.join(input_dir, "logs")
+    baseline_policy = "fixed_default"
+
+    delay_budget = compute_delay_budget(
+        records=records,
+        dataset=primary_dataset,
+        baseline_policy=baseline_policy,
+        budget_source=budget_source,
+        budget_multiplier=budget_multiplier,
+        budget_value=budget_value,
+        best_params_path=best_params_path
+    )
+
+    epsilon_threshold = delay_budget if delay_budget is not None else compute_epsilon_threshold(
         records,
         primary_dataset,
         epsilon_metric,
@@ -1527,12 +1953,9 @@ def run_analysis(
         epsilon_value
     )
     if epsilon_threshold is None:
-        print("Warning: fixed_default not found for epsilon threshold, skip constraint line")
+        print("Warning: delay budget not available, skip constraint line")
     else:
-        print(
-            f"Epsilon constraint: {epsilon_metric} <= {epsilon_threshold:.3f} "
-            f"({epsilon_relative}, value={epsilon_value})"
-        )
+        print(f"Delay budget: {epsilon_threshold:.3f} (source={budget_source})")
     
     # 2. 计算统计
     stats = compute_summary_stats(records, tuning_lambda)
@@ -1548,6 +1971,41 @@ def run_analysis(
     # 5. 保存增强汇总（含 t 检验）
     enhanced_path = os.path.join(output_dir, "summary_with_tests.csv")
     save_enhanced_summary_with_tests(records, stats, enhanced_path, tuning_lambda)
+
+    # Baseline-only evidence package (no LLM required)
+    main_table_path = os.path.join(output_dir, "main_table_by_disturbance.csv")
+    main_rows = compute_main_table_by_disturbance(
+        records=records,
+        dataset=primary_dataset,
+        delay_budget=delay_budget,
+        policies=policies
+    )
+    save_main_table_by_disturbance(main_rows, main_table_path)
+
+    budgeted_path = os.path.join(output_dir, "budgeted_best_drift.csv")
+    save_budgeted_best_drift(
+        tuning_results=tuning_results,
+        records=records,
+        dataset=primary_dataset,
+        delay_budget=delay_budget,
+        baseline_policy=baseline_policy,
+        output_path=budgeted_path
+    )
+
+    record_index = build_record_index(records, dataset=primary_dataset)
+    roll_rows = collect_roll_metrics(logs_dir, record_index)
+    roll_stats_path = os.path.join(output_dir, "roll_feasibility_stats.csv")
+    save_roll_feasibility_stats(roll_rows, roll_stats_path, policies=policies)
+
+    if episode_seed is not None:
+        episode_compare_path = os.path.join(output_dir, "episode_compare.png")
+        plot_episode_compare(
+            logs_dir=logs_dir,
+            seed=episode_seed,
+            policy_a=episode_policy_a,
+            policy_b=episode_policy_b,
+            output_path=episode_compare_path
+        )
     
     # 6. 生成图表
     print("\n生成图表...")
@@ -1568,11 +2026,12 @@ def run_analysis(
     )
     
     # 图表 3: LLM Time vs Solver Time
-    plot_llm_vs_solver_time(
-        records,
-        os.path.join(output_dir, "llm_vs_solver_time.png"),
-        dataset=primary_dataset
-    )
+    if include_llm:
+        plot_llm_vs_solver_time(
+            records,
+            os.path.join(output_dir, "llm_vs_solver_time.png"),
+            dataset=primary_dataset
+        )
     
     # 额外图表
     plot_policy_comparison_bars(
@@ -1672,7 +2131,7 @@ def run_analysis(
     plot_gantt_from_schedule(input_dir, os.path.join(output_dir, "gantt_chart.png"))
     
     # 7. LLM Reliability Report（如果有 llm_real 数据）
-    if "llm_real" in available_policies:
+    if include_llm and "llm_real" in available_policies:
         report_path = os.path.join(output_dir, "reliability_report.md")
         generate_llm_reliability_report(records, report_path, dataset=primary_dataset)
     
@@ -1683,9 +2142,15 @@ def run_analysis(
     print(f"输出文件:")
     print(f"  - {summary_path}")
     print(f"  - {enhanced_path}")
+    print(f"  - {output_dir}/main_table_by_disturbance.csv")
+    print(f"  - {output_dir}/budgeted_best_drift.csv")
+    print(f"  - {output_dir}/roll_feasibility_stats.csv")
+    if episode_seed is not None:
+        print(f"  - {output_dir}/episode_compare.png")
     print(f"  - {output_dir}/delay_vs_drift_scatter.png")
     print(f"  - {output_dir}/replans_switches_boxplot.png")
-    print(f"  - {output_dir}/llm_vs_solver_time.png")
+    if include_llm:
+        print(f"  - {output_dir}/llm_vs_solver_time.png")
     print(f"  - {output_dir}/policy_comparison_*.png")
     print(f"  - {output_dir}/policy_comparison_util_r_pad.png")
     print(f"  - {output_dir}/policy_comparison_makespan_cmax.png")
@@ -1695,7 +2160,7 @@ def run_analysis(
     print(f"  - {output_dir}/drift_by_disturbance.png")
     if can_plot_tuning:
         print(f"  - {output_dir}/tuning_heatmap.png")
-    if "llm_real" in available_policies:
+    if include_llm and "llm_real" in available_policies:
         print(f"  - {output_dir}/reliability_report.md")
     
     if show_plots:
@@ -1749,11 +2214,54 @@ def main():
         help="baseline: relative tolerance (e.g. 0.10); absolute: threshold value"
     )
     parser.add_argument(
+        "--include-llm", action="store_true",
+        help="include LLM-related outputs (default: off)"
+    )
+    parser.add_argument(
+        "--policies", type=str, default="fixed_default,fixed_tuned,nofreeze",
+        help="comma-separated policy filter for baseline tables"
+    )
+    parser.add_argument(
+        "--logs-dir", type=str, default=None,
+        help="logs directory containing metrics_per_roll.csv (default: input/logs)"
+    )
+    parser.add_argument(
+        "--budget-source", type=str, default="baseline",
+        choices=["baseline", "best_params", "manual"],
+        help="delay budget source (default: baseline)"
+    )
+    parser.add_argument(
+        "--budget-multiplier", type=float, default=1.05,
+        help="budget multiplier on baseline avg_delay (default: 1.05)"
+    )
+    parser.add_argument(
+        "--budget-value", type=float, default=None,
+        help="manual budget value (used when budget-source=manual)"
+    )
+    parser.add_argument(
+        "--best-params", type=str, default=None,
+        help="best_params.json path (used when budget-source=best_params)"
+    )
+    parser.add_argument(
+        "--episode-seed", type=int, default=None,
+        help="seed for episode compare plot (optional)"
+    )
+    parser.add_argument(
+        "--episode-policy-a", type=str, default="fixed_tuned",
+        help="policy A for episode compare plot"
+    )
+    parser.add_argument(
+        "--episode-policy-b", type=str, default="nofreeze",
+        help="policy B for episode compare plot"
+    )
+    parser.add_argument(
         "--show", action="store_true",
         help="显示图表窗口"
     )
     
     args = parser.parse_args()
+
+    policies = [p.strip() for p in (args.policies or "").split(",") if p.strip()]
     
     run_analysis(
         input_dir=args.input,
@@ -1762,7 +2270,17 @@ def main():
         tuning_lambda=args.tuning_lambda,
         epsilon_metric=args.epsilon_metric,
         epsilon_relative=args.epsilon_relative,
-        epsilon_value=args.epsilon_value
+        epsilon_value=args.epsilon_value,
+        include_llm=args.include_llm,
+        policies=policies,
+        logs_dir=args.logs_dir,
+        budget_source=args.budget_source,
+        budget_multiplier=args.budget_multiplier,
+        budget_value=args.budget_value,
+        best_params_path=args.best_params,
+        episode_seed=args.episode_seed,
+        episode_policy_a=args.episode_policy_a,
+        episode_policy_b=args.episode_policy_b
     )
 
 
