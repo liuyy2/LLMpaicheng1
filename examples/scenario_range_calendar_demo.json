@@ -1,0 +1,1603 @@
+{
+  "seed": 42,
+  "schema_version": "v2_1",
+  "disturbance_timeline": [
+    {
+      "event_type": "pad_outage",
+      "trigger_time": 12,
+      "target_id": "R_pad",
+      "params": {
+        "outage_start": 13,
+        "outage_end": 60
+      }
+    }
+  ],
+  "config_snapshot": {
+    "schema_version": "v2_1",
+    "slot_minutes": 15,
+    "rolling_interval": 12,
+    "horizon_slots": 96,
+    "sim_total_slots": 480,
+    "num_missions": 12,
+    "ops_per_mission": 7,
+    "num_resources": 6,
+    "enable_range_calendar": true,
+    "enable_range_test_asset": true,
+    "weather_mode": "range_closure"
+  },
+  "range_calendar": {
+    "0": [
+      [
+        12,
+        28
+      ],
+      [
+        40,
+        56
+      ],
+      [
+        68,
+        84
+      ]
+    ],
+    "1": [
+      [
+        108,
+        124
+      ],
+      [
+        136,
+        152
+      ],
+      [
+        164,
+        180
+      ]
+    ],
+    "2": [
+      [
+        204,
+        220
+      ],
+      [
+        232,
+        248
+      ],
+      [
+        260,
+        276
+      ]
+    ],
+    "3": [
+      [
+        300,
+        316
+      ],
+      [
+        328,
+        344
+      ],
+      [
+        356,
+        372
+      ]
+    ],
+    "4": [
+      [
+        396,
+        412
+      ],
+      [
+        424,
+        440
+      ],
+      [
+        452,
+        468
+      ]
+    ]
+  },
+  "missions": [
+    {
+      "mission_id": "M000",
+      "release": 163,
+      "due": 237,
+      "priority": 0.6,
+      "operations": [
+        {
+          "op_id": "M000_Op1",
+          "mission_id": "M000",
+          "op_index": 1,
+          "duration": 5,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op2",
+          "mission_id": "M000",
+          "op_index": 2,
+          "duration": 4,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M000_Op1"
+          ],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op3",
+          "mission_id": "M000",
+          "op_index": 3,
+          "duration": 8,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M000_Op2"
+          ],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op3b",
+          "mission_id": "M000",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M000_Op3"
+          ],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op4",
+          "mission_id": "M000",
+          "op_index": 5,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M000_Op3b"
+          ],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op5",
+          "mission_id": "M000",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M000_Op4"
+          ],
+          "time_windows": [],
+          "release": 163
+        },
+        {
+          "op_id": "M000_Op6",
+          "mission_id": "M000",
+          "op_index": 7,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M000_Op5"
+          ],
+          "time_windows": [
+            [
+              233,
+              242
+            ],
+            [
+              327,
+              340
+            ],
+            [
+              425,
+              434
+            ]
+          ],
+          "release": 163
+        }
+      ]
+    },
+    {
+      "mission_id": "M001",
+      "release": 7,
+      "due": 102,
+      "priority": 0.71,
+      "operations": [
+        {
+          "op_id": "M001_Op1",
+          "mission_id": "M001",
+          "op_index": 1,
+          "duration": 5,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op2",
+          "mission_id": "M001",
+          "op_index": 2,
+          "duration": 7,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M001_Op1"
+          ],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op3",
+          "mission_id": "M001",
+          "op_index": 3,
+          "duration": 7,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M001_Op2"
+          ],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op3b",
+          "mission_id": "M001",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M001_Op3"
+          ],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op4",
+          "mission_id": "M001",
+          "op_index": 5,
+          "duration": 12,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M001_Op3b"
+          ],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op5",
+          "mission_id": "M001",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M001_Op4"
+          ],
+          "time_windows": [],
+          "release": 7
+        },
+        {
+          "op_id": "M001_Op6",
+          "mission_id": "M001",
+          "op_index": 7,
+          "duration": 4,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M001_Op5"
+          ],
+          "time_windows": [
+            [
+              99,
+              109
+            ],
+            [
+              228,
+              237
+            ],
+            [
+              357,
+              364
+            ]
+          ],
+          "release": 7
+        }
+      ]
+    },
+    {
+      "mission_id": "M002",
+      "release": 207,
+      "due": 273,
+      "priority": 0.57,
+      "operations": [
+        {
+          "op_id": "M002_Op1",
+          "mission_id": "M002",
+          "op_index": 1,
+          "duration": 4,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op2",
+          "mission_id": "M002",
+          "op_index": 2,
+          "duration": 6,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M002_Op1"
+          ],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op3",
+          "mission_id": "M002",
+          "op_index": 3,
+          "duration": 10,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M002_Op2"
+          ],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op3b",
+          "mission_id": "M002",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M002_Op3"
+          ],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op4",
+          "mission_id": "M002",
+          "op_index": 5,
+          "duration": 9,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M002_Op3b"
+          ],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op5",
+          "mission_id": "M002",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M002_Op4"
+          ],
+          "time_windows": [],
+          "release": 207
+        },
+        {
+          "op_id": "M002_Op6",
+          "mission_id": "M002",
+          "op_index": 7,
+          "duration": 8,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M002_Op5"
+          ],
+          "time_windows": [
+            [
+              273,
+              284
+            ],
+            [
+              352,
+              364
+            ],
+            [
+              433,
+              443
+            ]
+          ],
+          "release": 207
+        }
+      ]
+    },
+    {
+      "mission_id": "M003",
+      "release": 91,
+      "due": 209,
+      "priority": 0.51,
+      "operations": [
+        {
+          "op_id": "M003_Op1",
+          "mission_id": "M003",
+          "op_index": 1,
+          "duration": 9,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op2",
+          "mission_id": "M003",
+          "op_index": 2,
+          "duration": 8,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M003_Op1"
+          ],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op3",
+          "mission_id": "M003",
+          "op_index": 3,
+          "duration": 4,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M003_Op2"
+          ],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op3b",
+          "mission_id": "M003",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M003_Op3"
+          ],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op4",
+          "mission_id": "M003",
+          "op_index": 5,
+          "duration": 11,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M003_Op3b"
+          ],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op5",
+          "mission_id": "M003",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M003_Op4"
+          ],
+          "time_windows": [],
+          "release": 91
+        },
+        {
+          "op_id": "M003_Op6",
+          "mission_id": "M003",
+          "op_index": 7,
+          "duration": 12,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M003_Op5"
+          ],
+          "time_windows": [
+            [
+              205,
+              222
+            ],
+            [
+              383,
+              397
+            ]
+          ],
+          "release": 91
+        }
+      ]
+    },
+    {
+      "mission_id": "M004",
+      "release": 160,
+      "due": 221,
+      "priority": 0.62,
+      "operations": [
+        {
+          "op_id": "M004_Op1",
+          "mission_id": "M004",
+          "op_index": 1,
+          "duration": 9,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op2",
+          "mission_id": "M004",
+          "op_index": 2,
+          "duration": 7,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M004_Op1"
+          ],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op3",
+          "mission_id": "M004",
+          "op_index": 3,
+          "duration": 5,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M004_Op2"
+          ],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op3b",
+          "mission_id": "M004",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M004_Op3"
+          ],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op4",
+          "mission_id": "M004",
+          "op_index": 5,
+          "duration": 4,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M004_Op3b"
+          ],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op5",
+          "mission_id": "M004",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M004_Op4"
+          ],
+          "time_windows": [],
+          "release": 160
+        },
+        {
+          "op_id": "M004_Op6",
+          "mission_id": "M004",
+          "op_index": 7,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M004_Op5"
+          ],
+          "time_windows": [
+            [
+              219,
+              228
+            ],
+            [
+              291,
+              301
+            ],
+            [
+              365,
+              374
+            ],
+            [
+              436,
+              448
+            ]
+          ],
+          "release": 160
+        }
+      ]
+    },
+    {
+      "mission_id": "M005",
+      "release": 213,
+      "due": 277,
+      "priority": 0.47,
+      "operations": [
+        {
+          "op_id": "M005_Op1",
+          "mission_id": "M005",
+          "op_index": 1,
+          "duration": 9,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op2",
+          "mission_id": "M005",
+          "op_index": 2,
+          "duration": 6,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M005_Op1"
+          ],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op3",
+          "mission_id": "M005",
+          "op_index": 3,
+          "duration": 9,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M005_Op2"
+          ],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op3b",
+          "mission_id": "M005",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M005_Op3"
+          ],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op4",
+          "mission_id": "M005",
+          "op_index": 5,
+          "duration": 9,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M005_Op3b"
+          ],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op5",
+          "mission_id": "M005",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M005_Op4"
+          ],
+          "time_windows": [],
+          "release": 213
+        },
+        {
+          "op_id": "M005_Op6",
+          "mission_id": "M005",
+          "op_index": 7,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M005_Op5"
+          ],
+          "time_windows": [
+            [
+              272,
+              281
+            ],
+            [
+              327,
+              340
+            ],
+            [
+              385,
+              395
+            ],
+            [
+              441,
+              454
+            ]
+          ],
+          "release": 213
+        }
+      ]
+    },
+    {
+      "mission_id": "M006",
+      "release": 118,
+      "due": 237,
+      "priority": 0.52,
+      "operations": [
+        {
+          "op_id": "M006_Op1",
+          "mission_id": "M006",
+          "op_index": 1,
+          "duration": 10,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op2",
+          "mission_id": "M006",
+          "op_index": 2,
+          "duration": 8,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M006_Op1"
+          ],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op3",
+          "mission_id": "M006",
+          "op_index": 3,
+          "duration": 12,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M006_Op2"
+          ],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op3b",
+          "mission_id": "M006",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M006_Op3"
+          ],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op4",
+          "mission_id": "M006",
+          "op_index": 5,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M006_Op3b"
+          ],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op5",
+          "mission_id": "M006",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M006_Op4"
+          ],
+          "time_windows": [],
+          "release": 118
+        },
+        {
+          "op_id": "M006_Op6",
+          "mission_id": "M006",
+          "op_index": 7,
+          "duration": 9,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M006_Op5"
+          ],
+          "time_windows": [
+            [
+              231,
+              243
+            ],
+            [
+              393,
+              404
+            ]
+          ],
+          "release": 118
+        }
+      ]
+    },
+    {
+      "mission_id": "M007",
+      "release": 68,
+      "due": 133,
+      "priority": 0.69,
+      "operations": [
+        {
+          "op_id": "M007_Op1",
+          "mission_id": "M007",
+          "op_index": 1,
+          "duration": 5,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op2",
+          "mission_id": "M007",
+          "op_index": 2,
+          "duration": 7,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M007_Op1"
+          ],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op3",
+          "mission_id": "M007",
+          "op_index": 3,
+          "duration": 9,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M007_Op2"
+          ],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op3b",
+          "mission_id": "M007",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M007_Op3"
+          ],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op4",
+          "mission_id": "M007",
+          "op_index": 5,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M007_Op3b"
+          ],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op5",
+          "mission_id": "M007",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M007_Op4"
+          ],
+          "time_windows": [],
+          "release": 68
+        },
+        {
+          "op_id": "M007_Op6",
+          "mission_id": "M007",
+          "op_index": 7,
+          "duration": 11,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M007_Op5"
+          ],
+          "time_windows": [
+            [
+              128,
+              144
+            ],
+            [
+              205,
+              219
+            ],
+            [
+              281,
+              296
+            ],
+            [
+              357,
+              371
+            ],
+            [
+              433,
+              447
+            ]
+          ],
+          "release": 68
+        }
+      ]
+    },
+    {
+      "mission_id": "M008",
+      "release": 67,
+      "due": 144,
+      "priority": 0.78,
+      "operations": [
+        {
+          "op_id": "M008_Op1",
+          "mission_id": "M008",
+          "op_index": 1,
+          "duration": 10,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op2",
+          "mission_id": "M008",
+          "op_index": 2,
+          "duration": 10,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M008_Op1"
+          ],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op3",
+          "mission_id": "M008",
+          "op_index": 3,
+          "duration": 9,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M008_Op2"
+          ],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op3b",
+          "mission_id": "M008",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M008_Op3"
+          ],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op4",
+          "mission_id": "M008",
+          "op_index": 5,
+          "duration": 7,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M008_Op3b"
+          ],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op5",
+          "mission_id": "M008",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M008_Op4"
+          ],
+          "time_windows": [],
+          "release": 67
+        },
+        {
+          "op_id": "M008_Op6",
+          "mission_id": "M008",
+          "op_index": 7,
+          "duration": 6,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M008_Op5"
+          ],
+          "time_windows": [
+            [
+              138,
+              146
+            ],
+            [
+              212,
+              220
+            ],
+            [
+              286,
+              294
+            ],
+            [
+              360,
+              369
+            ],
+            [
+              434,
+              443
+            ]
+          ],
+          "release": 67
+        }
+      ]
+    },
+    {
+      "mission_id": "M009",
+      "release": 152,
+      "due": 223,
+      "priority": 0.49,
+      "operations": [
+        {
+          "op_id": "M009_Op1",
+          "mission_id": "M009",
+          "op_index": 1,
+          "duration": 5,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op2",
+          "mission_id": "M009",
+          "op_index": 2,
+          "duration": 10,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M009_Op1"
+          ],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op3",
+          "mission_id": "M009",
+          "op_index": 3,
+          "duration": 10,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M009_Op2"
+          ],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op3b",
+          "mission_id": "M009",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M009_Op3"
+          ],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op4",
+          "mission_id": "M009",
+          "op_index": 5,
+          "duration": 11,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M009_Op3b"
+          ],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op5",
+          "mission_id": "M009",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M009_Op4"
+          ],
+          "time_windows": [],
+          "release": 152
+        },
+        {
+          "op_id": "M009_Op6",
+          "mission_id": "M009",
+          "op_index": 7,
+          "duration": 12,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M009_Op5"
+          ],
+          "time_windows": [
+            [
+              217,
+              235
+            ],
+            [
+              291,
+              305
+            ],
+            [
+              363,
+              377
+            ],
+            [
+              433,
+              451
+            ]
+          ],
+          "release": 152
+        }
+      ]
+    },
+    {
+      "mission_id": "M010",
+      "release": 164,
+      "due": 222,
+      "priority": 0.91,
+      "operations": [
+        {
+          "op_id": "M010_Op1",
+          "mission_id": "M010",
+          "op_index": 1,
+          "duration": 9,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op2",
+          "mission_id": "M010",
+          "op_index": 2,
+          "duration": 5,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M010_Op1"
+          ],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op3",
+          "mission_id": "M010",
+          "op_index": 3,
+          "duration": 8,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M010_Op2"
+          ],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op3b",
+          "mission_id": "M010",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M010_Op3"
+          ],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op4",
+          "mission_id": "M010",
+          "op_index": 5,
+          "duration": 10,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M010_Op3b"
+          ],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op5",
+          "mission_id": "M010",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M010_Op4"
+          ],
+          "time_windows": [],
+          "release": 164
+        },
+        {
+          "op_id": "M010_Op6",
+          "mission_id": "M010",
+          "op_index": 7,
+          "duration": 6,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M010_Op5"
+          ],
+          "time_windows": [
+            [
+              222,
+              230
+            ],
+            [
+              277,
+              287
+            ],
+            [
+              332,
+              344
+            ],
+            [
+              390,
+              399
+            ],
+            [
+              444,
+              456
+            ]
+          ],
+          "release": 164
+        }
+      ]
+    },
+    {
+      "mission_id": "M011",
+      "release": 76,
+      "due": 200,
+      "priority": 0.31,
+      "operations": [
+        {
+          "op_id": "M011_Op1",
+          "mission_id": "M011",
+          "op_index": 1,
+          "duration": 12,
+          "resources": [
+            "R1"
+          ],
+          "precedences": [],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op2",
+          "mission_id": "M011",
+          "op_index": 2,
+          "duration": 7,
+          "resources": [
+            "R2"
+          ],
+          "precedences": [
+            "M011_Op1"
+          ],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op3",
+          "mission_id": "M011",
+          "op_index": 3,
+          "duration": 6,
+          "resources": [
+            "R3"
+          ],
+          "precedences": [
+            "M011_Op2"
+          ],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op3b",
+          "mission_id": "M011",
+          "op_index": 4,
+          "duration": 2,
+          "resources": [
+            "R3",
+            "R_range_test"
+          ],
+          "precedences": [
+            "M011_Op3"
+          ],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op4",
+          "mission_id": "M011",
+          "op_index": 5,
+          "duration": 9,
+          "resources": [
+            "R_pad",
+            "R4"
+          ],
+          "precedences": [
+            "M011_Op3b"
+          ],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op5",
+          "mission_id": "M011",
+          "op_index": 6,
+          "duration": 0,
+          "resources": [
+            "R_pad"
+          ],
+          "precedences": [
+            "M011_Op4"
+          ],
+          "time_windows": [],
+          "release": 76
+        },
+        {
+          "op_id": "M011_Op6",
+          "mission_id": "M011",
+          "op_index": 7,
+          "duration": 6,
+          "resources": [
+            "R_pad",
+            "R3"
+          ],
+          "precedences": [
+            "M011_Op5"
+          ],
+          "time_windows": [
+            [
+              197,
+              209
+            ],
+            [
+              381,
+              391
+            ]
+          ],
+          "release": 76
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "resource_id": "R_pad",
+      "capacity": 1,
+      "unavailable": [
+        [
+          258,
+          287
+        ]
+      ]
+    },
+    {
+      "resource_id": "R1",
+      "capacity": 1,
+      "unavailable": []
+    },
+    {
+      "resource_id": "R2",
+      "capacity": 1,
+      "unavailable": []
+    },
+    {
+      "resource_id": "R3",
+      "capacity": 1,
+      "unavailable": []
+    },
+    {
+      "resource_id": "R4",
+      "capacity": 1,
+      "unavailable": []
+    },
+    {
+      "resource_id": "R_range_test",
+      "capacity": 1,
+      "unavailable": []
+    }
+  ]
+}

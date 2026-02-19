@@ -1,0 +1,1096 @@
+{
+  "seed": 0,
+  "policy_name": "fixed",
+  "metrics": {
+    "on_time_rate": 1.0,
+    "total_delay": 0,
+    "avg_delay": 0.0,
+    "max_delay": 0,
+    "weighted_tardiness": 0.0,
+    "resource_utilization": 0.1457,
+    "util_r_pad": 0.2271,
+    "episode_drift": 0.0,
+    "total_shifts": 0,
+    "total_switches": 0,
+    "total_window_switches": 0,
+    "total_sequence_switches": 0,
+    "avg_time_deviation_min": 0.0,
+    "total_resource_switches": 0,
+    "makespan_cmax": 646,
+    "feasible_rate": 0.9818,
+    "forced_replan_rate": 0.0182,
+    "avg_frozen": 2.71,
+    "avg_num_tasks_scheduled": 20.75,
+    "total_solve_time_ms": 1815,
+    "avg_solve_time_ms": 33.0,
+    "num_replans": 55,
+    "num_forced_replans": 1,
+    "num_completed": 15,
+    "num_total": 15,
+    "completion_rate": 1.0,
+    "drift_per_replan": 0.0,
+    "drift_per_day": 0.0
+  },
+  "final_schedule": [
+    {
+      "op_id": "M003_Op1",
+      "mission_id": "M003",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 1,
+      "end_slot": 12
+    },
+    {
+      "op_id": "M003_Op2",
+      "mission_id": "M003",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 12,
+      "end_slot": 21
+    },
+    {
+      "op_id": "M003_Op3",
+      "mission_id": "M003",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 21,
+      "end_slot": 28
+    },
+    {
+      "op_id": "M003_Op3b",
+      "mission_id": "M003",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 28,
+      "end_slot": 30
+    },
+    {
+      "op_id": "M003_Op4",
+      "mission_id": "M003",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 30,
+      "end_slot": 39
+    },
+    {
+      "op_id": "M003_Op5",
+      "mission_id": "M003",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 39,
+      "end_slot": 39
+    },
+    {
+      "op_id": "M003_Op6",
+      "mission_id": "M003",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 39,
+      "end_slot": 44
+    },
+    {
+      "op_id": "M014_Op1",
+      "mission_id": "M014",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 46,
+      "end_slot": 58
+    },
+    {
+      "op_id": "M014_Op2",
+      "mission_id": "M014",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 58,
+      "end_slot": 66
+    },
+    {
+      "op_id": "M014_Op3",
+      "mission_id": "M014",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 66,
+      "end_slot": 72
+    },
+    {
+      "op_id": "M014_Op3b",
+      "mission_id": "M014",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 72,
+      "end_slot": 74
+    },
+    {
+      "op_id": "M014_Op4",
+      "mission_id": "M014",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 74,
+      "end_slot": 81
+    },
+    {
+      "op_id": "M014_Op5",
+      "mission_id": "M014",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 81,
+      "end_slot": 81
+    },
+    {
+      "op_id": "M014_Op6",
+      "mission_id": "M014",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 81,
+      "end_slot": 92
+    },
+    {
+      "op_id": "M001_Op1",
+      "mission_id": "M001",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 97,
+      "end_slot": 105
+    },
+    {
+      "op_id": "M001_Op2",
+      "mission_id": "M001",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 105,
+      "end_slot": 117
+    },
+    {
+      "op_id": "M001_Op3",
+      "mission_id": "M001",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 117,
+      "end_slot": 123
+    },
+    {
+      "op_id": "M001_Op3b",
+      "mission_id": "M001",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 123,
+      "end_slot": 125
+    },
+    {
+      "op_id": "M001_Op4",
+      "mission_id": "M001",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 125,
+      "end_slot": 133
+    },
+    {
+      "op_id": "M001_Op5",
+      "mission_id": "M001",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 133,
+      "end_slot": 133
+    },
+    {
+      "op_id": "M001_Op6",
+      "mission_id": "M001",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 133,
+      "end_slot": 138
+    },
+    {
+      "op_id": "M006_Op1",
+      "mission_id": "M006",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 133,
+      "end_slot": 139
+    },
+    {
+      "op_id": "M006_Op2",
+      "mission_id": "M006",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 139,
+      "end_slot": 143
+    },
+    {
+      "op_id": "M006_Op3",
+      "mission_id": "M006",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 143,
+      "end_slot": 148
+    },
+    {
+      "op_id": "M006_Op3b",
+      "mission_id": "M006",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 148,
+      "end_slot": 150
+    },
+    {
+      "op_id": "M006_Op4",
+      "mission_id": "M006",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 150,
+      "end_slot": 162
+    },
+    {
+      "op_id": "M006_Op5",
+      "mission_id": "M006",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 162,
+      "end_slot": 162
+    },
+    {
+      "op_id": "M006_Op6",
+      "mission_id": "M006",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 162,
+      "end_slot": 172
+    },
+    {
+      "op_id": "M008_Op1",
+      "mission_id": "M008",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 174,
+      "end_slot": 183
+    },
+    {
+      "op_id": "M008_Op2",
+      "mission_id": "M008",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 183,
+      "end_slot": 193
+    },
+    {
+      "op_id": "M008_Op3",
+      "mission_id": "M008",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 193,
+      "end_slot": 197
+    },
+    {
+      "op_id": "M008_Op3b",
+      "mission_id": "M008",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 197,
+      "end_slot": 199
+    },
+    {
+      "op_id": "M008_Op4",
+      "mission_id": "M008",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 199,
+      "end_slot": 204
+    },
+    {
+      "op_id": "M008_Op5",
+      "mission_id": "M008",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 204,
+      "end_slot": 204
+    },
+    {
+      "op_id": "M009_Op1",
+      "mission_id": "M009",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 193,
+      "end_slot": 198
+    },
+    {
+      "op_id": "M009_Op2",
+      "mission_id": "M009",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 198,
+      "end_slot": 208
+    },
+    {
+      "op_id": "M009_Op3",
+      "mission_id": "M009",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 210,
+      "end_slot": 215
+    },
+    {
+      "op_id": "M008_Op6",
+      "mission_id": "M008",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 204,
+      "end_slot": 210
+    },
+    {
+      "op_id": "M009_Op3b",
+      "mission_id": "M009",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 215,
+      "end_slot": 217
+    },
+    {
+      "op_id": "M009_Op4",
+      "mission_id": "M009",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 217,
+      "end_slot": 226
+    },
+    {
+      "op_id": "M009_Op5",
+      "mission_id": "M009",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 226,
+      "end_slot": 226
+    },
+    {
+      "op_id": "M009_Op6",
+      "mission_id": "M009",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 226,
+      "end_slot": 231
+    },
+    {
+      "op_id": "M002_Op1",
+      "mission_id": "M002",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 323,
+      "end_slot": 330
+    },
+    {
+      "op_id": "M002_Op2",
+      "mission_id": "M002",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 330,
+      "end_slot": 342
+    },
+    {
+      "op_id": "M004_Op1",
+      "mission_id": "M004",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 330,
+      "end_slot": 342
+    },
+    {
+      "op_id": "M002_Op3",
+      "mission_id": "M002",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 342,
+      "end_slot": 353
+    },
+    {
+      "op_id": "M002_Op3b",
+      "mission_id": "M002",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 353,
+      "end_slot": 355
+    },
+    {
+      "op_id": "M004_Op2",
+      "mission_id": "M004",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 342,
+      "end_slot": 353
+    },
+    {
+      "op_id": "M004_Op3",
+      "mission_id": "M004",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 355,
+      "end_slot": 360
+    },
+    {
+      "op_id": "M002_Op4",
+      "mission_id": "M002",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 355,
+      "end_slot": 366
+    },
+    {
+      "op_id": "M002_Op5",
+      "mission_id": "M002",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 366,
+      "end_slot": 366
+    },
+    {
+      "op_id": "M011_Op1",
+      "mission_id": "M011",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 358,
+      "end_slot": 368
+    },
+    {
+      "op_id": "M004_Op3b",
+      "mission_id": "M004",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 378,
+      "end_slot": 380
+    },
+    {
+      "op_id": "M007_Op1",
+      "mission_id": "M007",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 368,
+      "end_slot": 373
+    },
+    {
+      "op_id": "M007_Op2",
+      "mission_id": "M007",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 374,
+      "end_slot": 383
+    },
+    {
+      "op_id": "M011_Op2",
+      "mission_id": "M011",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 368,
+      "end_slot": 374
+    },
+    {
+      "op_id": "M011_Op3",
+      "mission_id": "M011",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 380,
+      "end_slot": 384
+    },
+    {
+      "op_id": "M002_Op6",
+      "mission_id": "M002",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 366,
+      "end_slot": 378
+    },
+    {
+      "op_id": "M004_Op4",
+      "mission_id": "M004",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 380,
+      "end_slot": 388
+    },
+    {
+      "op_id": "M004_Op5",
+      "mission_id": "M004",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 388,
+      "end_slot": 388
+    },
+    {
+      "op_id": "M007_Op3",
+      "mission_id": "M007",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 388,
+      "end_slot": 393
+    },
+    {
+      "op_id": "M011_Op3b",
+      "mission_id": "M011",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 386,
+      "end_slot": 388
+    },
+    {
+      "op_id": "M000_Op1",
+      "mission_id": "M000",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 394,
+      "end_slot": 404
+    },
+    {
+      "op_id": "M000_Op2",
+      "mission_id": "M000",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 404,
+      "end_slot": 408
+    },
+    {
+      "op_id": "M007_Op3b",
+      "mission_id": "M007",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 398,
+      "end_slot": 400
+    },
+    {
+      "op_id": "M011_Op4",
+      "mission_id": "M011",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 388,
+      "end_slot": 400
+    },
+    {
+      "op_id": "M011_Op5",
+      "mission_id": "M011",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 400,
+      "end_slot": 400
+    },
+    {
+      "op_id": "M000_Op3",
+      "mission_id": "M000",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 408,
+      "end_slot": 416
+    },
+    {
+      "op_id": "M000_Op3b",
+      "mission_id": "M000",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 416,
+      "end_slot": 418
+    },
+    {
+      "op_id": "M007_Op4",
+      "mission_id": "M007",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 400,
+      "end_slot": 411
+    },
+    {
+      "op_id": "M007_Op5",
+      "mission_id": "M007",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 411,
+      "end_slot": 411
+    },
+    {
+      "op_id": "M000_Op4",
+      "mission_id": "M000",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 418,
+      "end_slot": 430
+    },
+    {
+      "op_id": "M000_Op5",
+      "mission_id": "M000",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 430,
+      "end_slot": 430
+    },
+    {
+      "op_id": "M013_Op1",
+      "mission_id": "M013",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 419,
+      "end_slot": 431
+    },
+    {
+      "op_id": "M013_Op2",
+      "mission_id": "M013",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 431,
+      "end_slot": 439
+    },
+    {
+      "op_id": "M013_Op3",
+      "mission_id": "M013",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 439,
+      "end_slot": 448
+    },
+    {
+      "op_id": "M013_Op3b",
+      "mission_id": "M013",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 448,
+      "end_slot": 450
+    },
+    {
+      "op_id": "M013_Op4",
+      "mission_id": "M013",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 450,
+      "end_slot": 460
+    },
+    {
+      "op_id": "M013_Op5",
+      "mission_id": "M013",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 460,
+      "end_slot": 460
+    },
+    {
+      "op_id": "M013_Op6",
+      "mission_id": "M013",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 460,
+      "end_slot": 468
+    },
+    {
+      "op_id": "M012_Op1",
+      "mission_id": "M012",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 481,
+      "end_slot": 487
+    },
+    {
+      "op_id": "M010_Op1",
+      "mission_id": "M010",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 490,
+      "end_slot": 497
+    },
+    {
+      "op_id": "M010_Op2",
+      "mission_id": "M010",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 497,
+      "end_slot": 501
+    },
+    {
+      "op_id": "M012_Op2",
+      "mission_id": "M012",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 487,
+      "end_slot": 494
+    },
+    {
+      "op_id": "M012_Op3",
+      "mission_id": "M012",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 494,
+      "end_slot": 498
+    },
+    {
+      "op_id": "M012_Op3b",
+      "mission_id": "M012",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 498,
+      "end_slot": 500
+    },
+    {
+      "op_id": "M010_Op3",
+      "mission_id": "M010",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 501,
+      "end_slot": 505
+    },
+    {
+      "op_id": "M010_Op3b",
+      "mission_id": "M010",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 505,
+      "end_slot": 507
+    },
+    {
+      "op_id": "M012_Op4",
+      "mission_id": "M012",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 500,
+      "end_slot": 506
+    },
+    {
+      "op_id": "M012_Op5",
+      "mission_id": "M012",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 506,
+      "end_slot": 506
+    },
+    {
+      "op_id": "M010_Op4",
+      "mission_id": "M010",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 507,
+      "end_slot": 519
+    },
+    {
+      "op_id": "M010_Op5",
+      "mission_id": "M010",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 519,
+      "end_slot": 519
+    },
+    {
+      "op_id": "M010_Op6",
+      "mission_id": "M010",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 525,
+      "end_slot": 535
+    },
+    {
+      "op_id": "M005_Op1",
+      "mission_id": "M005",
+      "op_index": 1,
+      "resources": [
+        "R1"
+      ],
+      "start_slot": 610,
+      "end_slot": 620
+    },
+    {
+      "op_id": "M005_Op2",
+      "mission_id": "M005",
+      "op_index": 2,
+      "resources": [
+        "R2"
+      ],
+      "start_slot": 620,
+      "end_slot": 629
+    },
+    {
+      "op_id": "M005_Op3",
+      "mission_id": "M005",
+      "op_index": 3,
+      "resources": [
+        "R3"
+      ],
+      "start_slot": 629,
+      "end_slot": 636
+    },
+    {
+      "op_id": "M005_Op3b",
+      "mission_id": "M005",
+      "op_index": 4,
+      "resources": [
+        "R3",
+        "R_range_test"
+      ],
+      "start_slot": 636,
+      "end_slot": 638
+    },
+    {
+      "op_id": "M005_Op4",
+      "mission_id": "M005",
+      "op_index": 5,
+      "resources": [
+        "R_pad",
+        "R4"
+      ],
+      "start_slot": 638,
+      "end_slot": 646
+    },
+    {
+      "op_id": "M005_Op5",
+      "mission_id": "M005",
+      "op_index": 6,
+      "resources": [
+        "R_pad"
+      ],
+      "start_slot": 646,
+      "end_slot": 646
+    },
+    {
+      "op_id": "M005_Op6",
+      "mission_id": "M005",
+      "op_index": 7,
+      "resources": [
+        "R_pad",
+        "R3"
+      ],
+      "start_slot": 646,
+      "end_slot": 652
+    }
+  ],
+  "completed_tasks": [
+    "M004",
+    "M006",
+    "M009",
+    "M013",
+    "M001",
+    "M002",
+    "M010",
+    "M011",
+    "M003",
+    "M012",
+    "M007",
+    "M008",
+    "M014",
+    "M005",
+    "M000"
+  ],
+  "uncompleted_tasks": [],
+  "total_runtime_s": 1.868,
+  "num_snapshots": 55
+}

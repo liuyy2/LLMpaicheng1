@@ -9,7 +9,7 @@ import time
 from typing import Dict, List, Any
 from dataclasses import dataclass
 
-from config import Config, DEFAULT_CONFIG
+from config import Config, DEFAULT_CONFIG, make_config_for_difficulty
 from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
@@ -77,7 +77,7 @@ def run_policy_comparison(
         ),
         NoFreezePolicy(
             w_delay=10.0, w_shift=0.2, w_switch=1.0,
-            freeze_horizon=0, policy_name="nofreeze"
+            freeze_horizon=0, policy_name="full_unlock"
         ),
         MockLLMPolicy(
             policy_name="mockllm",
@@ -274,14 +274,28 @@ def main():
         "--save-json", type=str, default=None,
         help="对比结果 JSON 文件路径"
     )
+    parser.add_argument(
+        "--difficulty", type=str, default="medium",
+        choices=["light", "medium", "heavy"],
+        help="扰动难度档位 (default: medium)"
+    )
+    parser.add_argument(
+        "--num-missions", type=int, default=None,
+        help="手动覆盖任务数"
+    )
     
     args = parser.parse_args()
     
     # 运行对比
     output_dir = args.output or f"logs/compare_{args.seed}"
+    config = make_config_for_difficulty(
+        difficulty=args.difficulty,
+        num_missions_override=args.num_missions,
+    )
     
     results = run_policy_comparison(
         seed=args.seed,
+        config=config,
         verbose=args.verbose,
         output_dir=output_dir
     )

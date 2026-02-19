@@ -170,12 +170,12 @@ def compute_window_loss_pct_ops(
     for mission in missions:
         if mission.mission_id in completed_missions:
             continue
-        op6 = mission.get_operation(6)
-        if not op6:
+        launch = mission.get_launch_op()
+        if not launch:
             continue
 
         slots = set()
-        for win_start, win_end in op6.time_windows:
+        for win_start, win_end in launch.time_windows:
             effective_start = max(win_start, now)
             effective_end = min(win_end, horizon_end)
             if effective_start <= effective_end:
@@ -481,20 +481,26 @@ def compute_delay_increase_ops(
         return 0.0, 0.0
 
     mission_map = {m.mission_id: m for m in missions}
+    # 构建 launch op_ids 集合
+    launch_op_ids = set()
+    for m in missions:
+        _launch = m.get_launch_op()
+        if _launch:
+            launch_op_ids.add(_launch.op_id)
 
     current_total_delay = 0
     potential_delay_increase = 0
 
     for assignment in current_plan.op_assignments:
-        if assignment.op_index != 6:
+        if assignment.op_id not in launch_op_ids:
             continue
 
         mission = mission_map.get(assignment.mission_id)
         if mission is None:
             continue
 
-        op6 = mission.get_operation(6)
-        if not op6 or op6.op_id in completed_ops:
+        launch = mission.get_launch_op()
+        if not launch or launch.op_id in completed_ops:
             continue
 
         current_delay = max(0, assignment.start_slot - mission.due)
@@ -502,13 +508,13 @@ def compute_delay_increase_ops(
 
         in_window = any(
             assignment.start_slot >= ws and assignment.end_slot <= we
-            for ws, we in op6.time_windows
+            for ws, we in launch.time_windows
         )
 
         if not in_window and assignment.start_slot > now:
             earliest_valid = None
-            for win_start, win_end in op6.time_windows:
-                if win_start >= assignment.start_slot and win_start + op6.duration <= win_end:
+            for win_start, win_end in launch.time_windows:
+                if win_start >= assignment.start_slot and win_start + launch.duration <= win_end:
                     earliest_valid = win_start
                     break
 
@@ -681,8 +687,8 @@ def compute_state_features_ops(
 
     completed_missions = set()
     for mission in missions:
-        op6 = mission.get_operation(6)
-        if op6 and op6.op_id in completed_ops:
+        launch = mission.get_launch_op()
+        if launch and launch.op_id in completed_ops:
             completed_missions.add(mission.mission_id)
 
     horizon_end = now + config.horizon_slots
@@ -743,6 +749,441 @@ def compute_state_features_ops(
     )
 
     return features, curr_window_slots
+
+
+# ============================================================================
+# TRCG 轻量根因诊断摘要（确定性、无图算法）
+# ============================================================================
+
+TRCG_CONFLICT_RESOURCES = ('R_pad', 'R3', 'R_range_test')
+_TRCG_RES_KEY_MAP = {
+    'R_pad': 'pad_util',
+    'R3': 'r3_util',
+    'R_range_test': 'range_test_util',
+}
+
+
+@dataclass
+class TRCGSummary:
+    """
+    轻量 TRCG（Temporal-Resource Conflict Graph）根因诊断摘要。
+
+    纯确定性计算、无图算法/GNN、顶级字段 = 8 个。
+    用途：构造 LLM prompt → LLM 输出 root_cause + unlock_set。
+
+    每个 rolling step 调用一次 build_trcg_summary() 生成。
+    """
+    now_slot: int
+    horizon_end_slot: int
+    bottleneck_pressure: Dict[str, float]           # {pad_util, r3_util, range_test_util}
+    top_conflicts: List[Dict[str, Any]]              # 至多 10 条
+    conflict_clusters: List[Dict[str, Any]]          # 至多 2 个
+    urgent_missions: List[Dict[str, Any]]            # 至多 3 个
+    disturbance_summary: Dict[str, Any]
+    frozen_summary: Dict[str, int]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'now_slot': self.now_slot,
+            'horizon_end_slot': self.horizon_end_slot,
+            'bottleneck_pressure': self.bottleneck_pressure,
+            'top_conflicts': self.top_conflicts,
+            'conflict_clusters': self.conflict_clusters,
+            'urgent_missions': self.urgent_missions,
+            'disturbance_summary': self.disturbance_summary,
+            'frozen_summary': self.frozen_summary,
+        }
+
+    def to_prompt_str(self) -> str:
+        """生成用于 LLM prompt 的紧凑 JSON 文本（单行，节省 token）。"""
+        import json as _json
+        return _json.dumps(self.to_dict(), ensure_ascii=False, separators=(',', ':'))
+
+
+# ----- TRCG 内部辅助函数 -----
+
+def _trcg_bottleneck_pressure(
+    missions: List[Mission],
+    resources: List[Resource],
+    now: int,
+    horizon_end: int,
+    completed_ops: Set[str],
+) -> Dict[str, float]:
+    """
+    计算 R_pad / R3 / R_range_test 的利用率（demand / effective_capacity）。
+    """
+    result: Dict[str, float] = {}
+    for res_id in TRCG_CONFLICT_RESOURCES:
+        resource = next((r for r in resources if r.resource_id == res_id), None)
+        if resource is None:
+            result[_TRCG_RES_KEY_MAP[res_id]] = 0.0
+            continue
+        demand = 0
+        for mission in missions:
+            for op in mission.operations:
+                if op.op_id in completed_ops or op.release > horizon_end:
+                    continue
+                if res_id in op.resources:
+                    demand += op.duration
+        span = max(1, horizon_end - now)
+        capacity = span * max(1, resource.capacity)
+        unavail = _compute_unavailable_slots(resource.unavailable, now, horizon_end)
+        effective = max(1, capacity - unavail)
+        result[_TRCG_RES_KEY_MAP[res_id]] = round(min(1.0, demand / effective), 4)
+    return result
+
+
+def _trcg_project_intervals(
+    missions: List[Mission],
+    plan: Optional[PlanV2_1],
+    started_ops: Set[str],
+    completed_ops: Set[str],
+    actual_durations: Dict[str, int],
+) -> Dict[str, Tuple[int, int]]:
+    """
+    将 prev_plan 投影为"当前现实下的预计区间"。
+
+    规则（逐 mission、按 op_index 顺序）：
+      - 已完成 op：保留原区间（仅用于前驱推算）。
+      - 已开始 op：start 不变，end = start + actual_duration；
+        若 actual end > planned end → carry_delay 向后传播。
+      - 未开始 op：start = planned_start + carry_delay，
+        end   = start + planned_duration（从 assign 计算）。
+
+    carry_delay 在 mission 内逐 op 累积，不会跨 mission。
+    """
+    if plan is None:
+        return {}
+
+    assign_map: Dict[str, OpAssignment] = {
+        a.op_id: a for a in plan.op_assignments
+    }
+    projected: Dict[str, Tuple[int, int]] = {}
+
+    for mission in missions:
+        ops = sorted(mission.operations, key=lambda o: o.op_index)
+        carry = 0  # 本 mission 累积延迟
+
+        for op in ops:
+            assign = assign_map.get(op.op_id)
+            if assign is None:
+                continue
+
+            planned_dur = max(0, assign.end_slot - assign.start_slot)
+
+            if op.op_id in completed_ops:
+                projected[op.op_id] = (assign.start_slot, assign.end_slot)
+                continue
+
+            if op.op_id in started_ops:
+                # 已开始：start 不变，用 actual_duration 修正 end
+                s = assign.start_slot
+                dur = actual_durations.get(op.op_id, planned_dur)
+                e = s + dur
+                extra = max(0, e - assign.end_slot)
+                carry += extra
+            else:
+                # 未开始：向后平移 carry
+                s = assign.start_slot + carry
+                e = s + planned_dur
+
+            projected[op.op_id] = (s, e)
+
+    return projected
+
+
+def _trcg_detect_conflicts(
+    missions: List[Mission],
+    projected: Dict[str, Tuple[int, int]],
+    completed_ops: Set[str],
+    max_n: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    在投影区间上检测资源时间冲突（仅 R_pad / R3 / R_range_test）。
+
+    同一 mission 内的 op 不算冲突；零时长 op 跳过。
+    severity = overlap_slots * (priority_a + priority_b)。
+    返回 severity 降序排列的前 max_n 条。
+    """
+    mission_map = {m.mission_id: m for m in missions}
+
+    # 按资源收集 (mission_id, start, end)
+    res_entries: Dict[str, List[Tuple[str, int, int]]] = {
+        r: [] for r in TRCG_CONFLICT_RESOURCES
+    }
+
+    for mission in missions:
+        for op in mission.operations:
+            if op.op_id in completed_ops or op.op_id not in projected:
+                continue
+            s, e = projected[op.op_id]
+            if e <= s:
+                continue
+            for rid in op.resources:
+                if rid in res_entries:
+                    res_entries[rid].append((mission.mission_id, s, e))
+
+    conflicts: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str, str]] = set()
+
+    for rid, entries in res_entries.items():
+        n = len(entries)
+        for i in range(n):
+            m_a, s_a, e_a = entries[i]
+            for j in range(i + 1, n):
+                m_b, s_b, e_b = entries[j]
+                if m_a == m_b:
+                    continue
+                key = (min(m_a, m_b), max(m_a, m_b), rid)
+                if key in seen:
+                    continue
+                overlap = min(e_a, e_b) - max(s_a, s_b)
+                if overlap <= 0:
+                    continue
+                seen.add(key)
+                p_a = mission_map[m_a].priority
+                p_b = mission_map[m_b].priority
+                conflicts.append({
+                    'a': m_a,
+                    'b': m_b,
+                    'resource': rid,
+                    'overlap_slots': overlap,
+                    't_range': [max(s_a, s_b), min(e_a, e_b)],
+                    'severity': round(overlap * (p_a + p_b), 2),
+                })
+
+    conflicts.sort(key=lambda c: c['severity'], reverse=True)
+    return conflicts[:max_n]
+
+
+def _trcg_build_clusters(
+    conflicts: List[Dict[str, Any]],
+    max_clusters: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    从 top_conflicts 构造至多 *max_clusters* 个冲突簇。
+
+    center = 加权度数（Σ severity）最大的 mission。
+    members = center + 其在冲突图中的直接邻居（按加权度数降序）。
+    同一 mission 不会出现在两个簇中。
+    """
+    if not conflicts:
+        return []
+
+    degree: Dict[str, float] = {}
+    neighbors: Dict[str, Set[str]] = {}
+    for c in conflicts:
+        for m in (c['a'], c['b']):
+            degree[m] = degree.get(m, 0.0) + c['severity']
+            neighbors.setdefault(m, set())
+        neighbors[c['a']].add(c['b'])
+        neighbors[c['b']].add(c['a'])
+
+    clusters: List[Dict[str, Any]] = []
+    used: Set[str] = set()
+
+    for center in sorted(degree, key=degree.get, reverse=True):
+        if center in used or len(clusters) >= max_clusters:
+            break
+        members = [center] + sorted(
+            (n for n in neighbors.get(center, set()) if n not in used),
+            key=lambda m: degree.get(m, 0),
+            reverse=True,
+        )
+        clusters.append({
+            'center_mission_id': center,
+            'members': members,
+            'score': round(degree[center], 2),
+        })
+        used.update(members)
+
+    return clusters
+
+
+def _trcg_find_urgent(
+    missions: List[Mission],
+    plan: Optional[PlanV2_1],
+    now: int,
+    completed_ops: Set[str],
+    max_n: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    找出最紧迫的 mission（Op6 窗口余裕 / due 接近 / 现有 delay）。
+
+    urgency_score = due_slack + 0.5 * window_slack − 2 * current_delay
+    越小越紧迫。返回前 max_n 条。
+    """
+    assign_map: Dict[str, OpAssignment] = {}
+    if plan:
+        assign_map = {a.op_id: a for a in plan.op_assignments}
+
+    urgents: List[Dict[str, Any]] = []
+
+    for mission in missions:
+        launch = mission.get_launch_op()
+        if not launch or launch.op_id in completed_ops:
+            continue
+
+        due_slack = mission.due - now
+
+        # Launch 最近可用窗口距 now 的间隔
+        win_slack = 9999
+        if launch.time_windows:
+            for ws, we in sorted(launch.time_windows):
+                if we > now:
+                    win_slack = max(0, ws - now)
+                    break
+            else:
+                win_slack = 0  # 所有窗口已过
+
+        # 当前计划下的 delay
+        current_delay = 0
+        assign = assign_map.get(launch.op_id)
+        if assign:
+            current_delay = max(0, assign.start_slot - mission.due)
+
+        score = due_slack + 0.5 * win_slack - 2.0 * current_delay
+
+        urgents.append({
+            'mission_id': mission.mission_id,
+            'due_slot': mission.due,
+            'due_slack_slots': due_slack,
+            'window_slack_slots': win_slack if win_slack < 9999 else -1,
+            'current_delay_slots': current_delay,
+            'priority': mission.priority,
+            'urgency_score': round(score, 1),
+        })
+
+    urgents.sort(key=lambda u: u['urgency_score'])
+    return urgents[:max_n]
+
+
+def _trcg_disturbance_summary(
+    missions: List[Mission],
+    resources: List[Resource],
+    now: int,
+    horizon_end: int,
+    completed_ops: Set[str],
+    prev_window_slots: Optional[Dict[str, Set[int]]],
+    actual_durations: Dict[str, int],
+) -> Dict[str, Any]:
+    """
+    扰动摘要：range_loss_pct / pad_outage_active / duration_volatility_level。
+    """
+    # ---- range_loss_pct: Launch 窗口 slot 损失比例 ----
+    total_now = 0
+    total_prev = 0
+    for mission in missions:
+        launch = mission.get_launch_op()
+        if not launch or launch.op_id in completed_ops:
+            continue
+        cur_slots: Set[int] = set()
+        for ws, we in launch.time_windows:
+            for s in range(max(ws, now), min(we, horizon_end) + 1):
+                cur_slots.add(s)
+        total_now += len(cur_slots)
+        if prev_window_slots and mission.mission_id in prev_window_slots:
+            total_prev += len(prev_window_slots[mission.mission_id])
+
+    range_loss = max(0.0, 1.0 - total_now / total_prev) if total_prev > 0 else 0.0
+
+    # ---- pad_outage_active ----
+    pad_outage_active = False
+    pad = next((r for r in resources if r.resource_id == 'R_pad'), None)
+    if pad:
+        for ua_s, ua_e in pad.unavailable:
+            if ua_s <= horizon_end and ua_e >= now:
+                pad_outage_active = True
+                break
+
+    # ---- duration_volatility_level ----
+    n_mod = len(actual_durations)
+    if n_mod >= 5:
+        vol = 'high'
+    elif n_mod >= 2:
+        vol = 'medium'
+    elif n_mod >= 1:
+        vol = 'low'
+    else:
+        vol = 'none'
+
+    return {
+        'range_loss_pct': round(range_loss, 3),
+        'pad_outage_active': pad_outage_active,
+        'duration_volatility_level': vol,
+    }
+
+
+# ----- TRCG 主入口 -----
+
+def build_trcg_summary(
+    missions: List[Mission],
+    resources: List[Resource],
+    plan: Optional[PlanV2_1],
+    now: int,
+    config: Config,
+    started_ops: Set[str],
+    completed_ops: Set[str],
+    actual_durations: Dict[str, int],
+    frozen_ops: Dict[str, OpAssignment],
+    prev_window_slots: Optional[Dict[str, Set[int]]] = None,
+) -> TRCGSummary:
+    """
+    构造轻量 TRCG 根因诊断摘要（确定性，每 rolling step 调用一次）。
+
+    Parameters
+    ----------
+    plan : 上一轮求解器产出的计划（policy.decide 调用时即 state.current_plan）。
+    frozen_ops : 当前已计算好的冻结 op 字典（由 compute_frozen_ops 给出）。
+    prev_window_slots : 上一步窗口 slot 集合（用于计算 range_loss_pct）。
+
+    Returns
+    -------
+    TRCGSummary  —— 8 个顶级字段，可直接 .to_dict() 或 .to_prompt_str() 喂给 LLM。
+    """
+    horizon_end = now + config.horizon_slots
+
+    # 1. 瓶颈压力
+    pressure = _trcg_bottleneck_pressure(
+        missions, resources, now, horizon_end, completed_ops,
+    )
+
+    # 2. 投影 → 冲突检测
+    projected = _trcg_project_intervals(
+        missions, plan, started_ops, completed_ops, actual_durations,
+    )
+    conflicts = _trcg_detect_conflicts(missions, projected, completed_ops)
+
+    # 3. 冲突簇
+    clusters = _trcg_build_clusters(conflicts)
+
+    # 4. 紧迫 mission
+    urgent = _trcg_find_urgent(missions, plan, now, completed_ops)
+
+    # 5. 扰动摘要
+    dist_summary = _trcg_disturbance_summary(
+        missions, resources, now, horizon_end,
+        completed_ops, prev_window_slots, actual_durations,
+    )
+
+    # 6. 冻结摘要
+    frozen_summary = {
+        'num_started_ops': len(started_ops),
+        'num_frozen_ops': len(frozen_ops),
+        'frozen_horizon_slots': config.freeze_horizon,
+    }
+
+    return TRCGSummary(
+        now_slot=now,
+        horizon_end_slot=horizon_end,
+        bottleneck_pressure=pressure,
+        top_conflicts=conflicts,
+        conflict_clusters=clusters,
+        urgent_missions=urgent,
+        disturbance_summary=dist_summary,
+        frozen_summary=frozen_summary,
+    )
+
 
 # ============================================================================
 # 模块测试

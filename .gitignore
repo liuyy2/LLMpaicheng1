@@ -14,3 +14,9 @@ results_V2.5_quick/
 results_quick_1/
 results_quick_2/
 results_V2.5_LLM_30_3/
+__pycache__/
+llm_logs/
+results/batch_10day/
+test_output_temp/
+
+

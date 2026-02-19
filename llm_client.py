@@ -26,9 +26,12 @@ import random
 import tempfile
 import shutil
 import re
+import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any, List, Tuple, Callable
 from datetime import datetime
+
+logger = logging.getLogger("LLMClient")
 
 try:
     from openai import OpenAI, APIError, APITimeoutError, RateLimitError, APIConnectionError
@@ -59,12 +62,12 @@ class LLMConfig:
     # 生成参数
     temperature: float = 0.0
     top_p: float = 1.0
-    max_tokens: int = 256
+    max_tokens: int = 4096                     # deepseek-reasoner 需要足够 token 容纳思维链 + 可见输出
     
     # 超时与重试
-    timeout_s: float = 30.0
-    max_retries: int = 5
-    retry_base_delay_s: float = 1.0
+    timeout_s: float = 120.0                  # deepseek-reasoner 思维链较长，需要充足超时
+    max_retries: int = 3
+    retry_base_delay_s: float = 2.0
     retry_max_delay_s: float = 60.0
     retry_jitter: float = 0.5                  # jitter 比例 (0-1)
     
@@ -120,6 +123,7 @@ class LLMCallResult:
     # 错误信息
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+    http_status_code: Optional[int] = None     # HTTP 状态码（仅 APIError 时有值）
     
     # 元数据
     timestamp: str = ""
@@ -145,6 +149,7 @@ class LLMCallResult:
             "tokens_total": self.tokens_total,
             "error_type": self.error_type,
             "error_message": self.error_message,
+            "http_status_code": self.http_status_code,
             "cache_key": self.cache_key[:16] if self.cache_key else None
         }
 
@@ -201,7 +206,7 @@ class LLMCache:
         获取缓存
         
         Returns:
-            缓存数据 or None
+            缓存数据 or None（包括坏缓存自动失效）
         """
         cache_path = self._get_cache_path(cache_key)
         
@@ -210,7 +215,7 @@ class LLMCache:
         
         try:
             with open(cache_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
         except (json.JSONDecodeError, IOError):
             # 缓存损坏，删除
             try:
@@ -218,6 +223,21 @@ class LLMCache:
             except OSError:
                 pass
             return None
+
+        # 坏缓存自动失效：raw_text 为空且 finish_reason=length（max_tokens 不足）
+        raw = data.get("raw_text", "")
+        if not raw and data.get("finish_reason") == "length":
+            logger.warning(
+                "Cache invalidated (empty raw_text + finish_reason=length): %s",
+                cache_key[:16]
+            )
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+            return None
+
+        return data
     
     def set(self, cache_key: str, data: Dict[str, Any]) -> bool:
         """
@@ -437,7 +457,8 @@ class LLMClient:
         self._client = OpenAI(
             api_key=api_key,
             base_url=config.base_url,
-            timeout=config.timeout_s
+            timeout=config.timeout_s,
+            max_retries=0,  # 禁用 SDK 内置重试，由 _call_with_retry 统一管理
         )
         
         # 初始化缓存
@@ -626,6 +647,18 @@ class LLMClient:
                 choice = response.choices[0] if response.choices else None
                 raw_text = choice.message.content if choice else ""
                 finish_reason = choice.finish_reason if choice else None
+
+                # deepseek-reasoner / 推理模型：若 content 为空但有 reasoning_content，
+                # 可能是 max_tokens 不足导致可见输出被截断。
+                # 记录 reasoning_content 供调试。
+                if choice and not raw_text:
+                    reasoning = getattr(choice.message, 'reasoning_content', None)
+                    if reasoning:
+                        logger.warning(
+                            "LLM content 为空但有 reasoning_content (%d chars)，"
+                            "可能 max_tokens=%d 不足。思维链消耗了所有 token。",
+                            len(reasoning), max_tokens
+                        )
                 
                 # Token 使用
                 usage = response.usage
@@ -671,6 +704,7 @@ class LLMClient:
                     retries=retries,
                     error_type=type(e).__name__,
                     error_message=str(e),
+                    http_status_code=status_code,
                     timestamp=timestamp,
                     cache_key=cache_key
                 )
@@ -692,6 +726,7 @@ class LLMClient:
         
         # 所有重试都失败
         latency_ms = int((time.time() - start_time) * 1000)
+        _last_http = getattr(last_error, 'status_code', None) if last_error else None
         return LLMCallResult(
             success=False,
             model=self.config.model,
@@ -700,6 +735,7 @@ class LLMClient:
             retries=retries,
             error_type=type(last_error).__name__ if last_error else "UnknownError",
             error_message=str(last_error) if last_error else "Max retries exceeded",
+            http_status_code=_last_http,
             timestamp=timestamp,
             cache_key=cache_key
         )

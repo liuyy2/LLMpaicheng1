@@ -109,19 +109,15 @@ class GreedyPolicy(BasePolicy):
     
     def __init__(
         self,
-        sort_by: str = "due",  # "due" or "window_start"
         prefer_pad_switch: bool = False,  # 是否倾向于保持原 pad
         policy_name: str = "greedy"
     ):
         """
         Args:
-            sort_by: 排序方式
-                - "due": EDF，按 due 时间升序
-                - "window_start": 按第一个窗口起点升序
             prefer_pad_switch: 是否在同等条件下倾向于保持原 pad
             policy_name: 策略名称
         """
-        self._sort_by = sort_by
+        self._sort_by = "due"  # 固定使用 EDF（Earliest Deadline First）
         self._prefer_pad_switch = prefer_pad_switch
         self._policy_name = policy_name
         
@@ -187,7 +183,7 @@ class GreedyPolicy(BasePolicy):
 
         for mission in missions_sorted:
             ops_by_idx = {op.op_index: op for op in mission.operations}
-            mission_release = state.actual_releases.get(mission.mission_id, mission.release)
+            mission_release = mission.release
             prev_end = max(now, mission_release)
 
             for op_index in sorted(ops_by_idx.keys()):
@@ -199,59 +195,71 @@ class GreedyPolicy(BasePolicy):
                 op_release = max(op.release, mission_release)
                 earliest = max(now, op_release, prev_end)
 
+                # V2.5: 支持 Op4-5-6-7 block（Op7 是真正的发射操作）
                 if op_index == 4 and 5 in ops_by_idx and 6 in ops_by_idx:
                     op5 = ops_by_idx[5]
                     op6 = ops_by_idx[6]
+                    op7 = ops_by_idx.get(7)  # V2.5 可能有 Op7
+                    
                     if op5.op_id not in fixed_end and op6.op_id not in fixed_end:
-                        block = self._find_block_start(
-                            resource_schedules,
-                            earliest,
-                            op,
-                            op5,
-                            op6,
-                            config.sim_total_slots,
-                            op5_max_wait_slots
-                        )
-                        if block is not None:
-                            start4, start6 = block
-                            end4 = start4 + op.duration
-                            start5 = end4
-                            end5 = start6
-                            end6 = start6 + op6.duration
-                            assignments.append(OpAssignment(
-                                op_id=op.op_id,
-                                mission_id=op.mission_id,
-                                op_index=op.op_index,
-                                resources=op.resources,
-                                start_slot=start4,
-                                end_slot=end4
-                            ))
-                            assignments.append(OpAssignment(
-                                op_id=op5.op_id,
-                                mission_id=op5.mission_id,
-                                op_index=op5.op_index,
-                                resources=op5.resources,
-                                start_slot=start5,
-                                end_slot=end5
-                            ))
-                            assignments.append(OpAssignment(
-                                op_id=op6.op_id,
-                                mission_id=op6.mission_id,
-                                op_index=op6.op_index,
-                                resources=op6.resources,
-                                start_slot=start6,
-                                end_slot=end6
-                            ))
-                            fixed_end[op.op_id] = end4
-                            fixed_end[op5.op_id] = end5
-                            fixed_end[op6.op_id] = end6
-                            self._reserve_interval(resource_schedules, op.resources, start4, end4)
-                            self._reserve_interval(resource_schedules, op5.resources, start5, end5)
-                            self._reserve_interval(resource_schedules, op6.resources, start6, end6)
-                            prev_end = end6
-                            continue
-                        else:
-                            break
+                        # V2.5: 使用 Op7 的窗口（如果存在）
+                        launch_op = op7 if (op7 and op7.time_windows) else op6
+                        
+                        if launch_op.time_windows:
+                            block = self._find_block_start_v2_5(
+                                resource_schedules,
+                                earliest,
+                                op,
+                                op5,
+                                op6,
+                                launch_op,
+                                config.sim_total_slots,
+                                op5_max_wait_slots
+                            )
+                            if block is not None:
+                                start4, start_launch = block
+                                end4 = start4 + op.duration
+                                start5 = end4
+                                
+                                # V2.5: Op6 可能是 dur=0 的 dummy
+                                if op7 and launch_op == op7:
+                                    # Op4-5-6(dummy)-7 结构
+                                    start6 = start_launch  # Op6 dummy: start=end=Op7.start
+                                    end5 = start6
+                                    end6 = start6
+                                    start7 = start_launch
+                                    end7 = start7 + op7.duration
+                                    
+                                    assignments.extend([
+                                        OpAssignment(op.op_id, op.mission_id, op.op_index, op.resources, start4, end4),
+                                        OpAssignment(op5.op_id, op5.mission_id, op5.op_index, op5.resources, start5, end5),
+                                        OpAssignment(op6.op_id, op6.mission_id, op6.op_index, op6.resources, start6, end6),
+                                        OpAssignment(op7.op_id, op7.mission_id, op7.op_index, op7.resources, start7, end7)
+                                    ])
+                                    fixed_end.update({op.op_id: end4, op5.op_id: end5, op6.op_id: end6, op7.op_id: end7})
+                                    self._reserve_interval(resource_schedules, op.resources, start4, end4)
+                                    self._reserve_interval(resource_schedules, op5.resources, start5, end5)
+                                    self._reserve_interval(resource_schedules, op7.resources, start7, end7)
+                                    prev_end = end7
+                                else:
+                                    # 原 Op4-5-6 结构
+                                    start6 = start_launch
+                                    end5 = start6
+                                    end6 = start6 + op6.duration
+                                    
+                                    assignments.extend([
+                                        OpAssignment(op.op_id, op.mission_id, op.op_index, op.resources, start4, end4),
+                                        OpAssignment(op5.op_id, op5.mission_id, op5.op_index, op5.resources, start5, end5),
+                                        OpAssignment(op6.op_id, op6.mission_id, op6.op_index, op6.resources, start6, end6)
+                                    ])
+                                    fixed_end.update({op.op_id: end4, op5.op_id: end5, op6.op_id: end6})
+                                    self._reserve_interval(resource_schedules, op.resources, start4, end4)
+                                    self._reserve_interval(resource_schedules, op5.resources, start5, end5)
+                                    self._reserve_interval(resource_schedules, op6.resources, start6, end6)
+                                    prev_end = end6
+                                continue
+                        # 如果 block 失败，继续尝试单独排程（改为 continue 而非 break）
+                        continue
 
                 if op_index == 6 and op.time_windows:
                     start = self._find_earliest_start_in_windows(
@@ -410,6 +418,69 @@ class GreedyPolicy(BasePolicy):
                 t6 += 1
         return None
     
+    def _find_block_start_v2_5(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        earliest: int,
+        op4: Operation,
+        op5: Operation,
+        op6: Operation,
+        launch_op: Operation,
+        max_time: int,
+        op5_max_wait_slots: int
+    ) -> Optional[Tuple[int, int]]:
+        """V2.5: 支持 Op6 作为 dummy + Op7 作为发射操作"""
+        if not launch_op.time_windows:
+            return None
+        
+        op5_min = max(0, op5.duration)
+        op5_max_wait = max(0, op5_max_wait_slots)
+        total_min = op4.duration + op5_min
+        total_max = total_min + op5_max_wait
+        
+        for ws, we in sorted(launch_op.time_windows):
+            t_launch = max(ws, earliest + total_min)
+            while t_launch + launch_op.duration <= we and t_launch + launch_op.duration <= max_time:
+                latest_start4 = t_launch - total_min
+                earliest_start4 = t_launch - total_max
+                if latest_start4 < earliest:
+                    t_launch += 1
+                    continue
+                start4_min = max(earliest, earliest_start4)
+                start4 = latest_start4
+                while start4 >= start4_min:
+                    # 检查 Op4-5-launch 是否可用（Op6 dummy 不占用资源）
+                    if self._block_available_v2_5(schedules, op4, op5, launch_op, start4, t_launch):
+                        return start4, t_launch
+                    start4 -= 1
+                t_launch += 1
+        return None
+    
+    def _block_available_v2_5(
+        self,
+        schedules: Dict[str, List[Tuple[int, int]]],
+        op4: Operation,
+        op5: Operation,
+        launch_op: Operation,
+        start4: int,
+        start_launch: int
+    ) -> bool:
+        """V2.5: 检查 Op4-5-launch 是否可用"""
+        end4 = start4 + op4.duration
+        start5 = end4
+        end5 = start_launch
+        end_launch = start_launch + launch_op.duration
+        
+        if end5 < start5:
+            return False
+        if not self._is_available(schedules, op4.resources, start4, end4):
+            return False
+        if not self._is_available(schedules, op5.resources, start5, end5):
+            return False
+        if not self._is_available(schedules, launch_op.resources, start_launch, end_launch):
+            return False
+        return True
+    
     def _get_tasks_to_schedule(
         self,
         state: Any,
@@ -426,24 +497,13 @@ class GreedyPolicy(BasePolicy):
             if task.task_id in state.started_tasks:
                 continue
             # 检查 release
-            actual_release = state.actual_releases.get(task.task_id, task.release)
-            if actual_release <= horizon_end:
+            if task.release <= horizon_end:
                 tasks.append(task)
         return tasks
     
     def _sort_tasks(self, tasks: List[Task]) -> List[Task]:
-        """按策略排序任务"""
-        if self._sort_by == "due":
-            # EDF: Earliest Deadline First
-            return sorted(tasks, key=lambda t: (t.due, t.priority * -1))
-        elif self._sort_by == "window_start":
-            # 按第一个窗口起点
-            return sorted(tasks, key=lambda t: (
-                min(w[0] for w in t.windows) if t.windows else float('inf'),
-                t.due
-            ))
-        else:
-            return tasks
+        """按 EDF (Earliest Deadline First) 排序任务"""
+        return sorted(tasks, key=lambda t: (t.due, t.priority * -1))
     
     def _find_best_assignment(
         self,
@@ -515,14 +575,7 @@ class GreedyPolicy(BasePolicy):
 
 
 class EDFGreedyPolicy(GreedyPolicy):
-    """EDF 贪心策略的快捷创建"""
+    """EDF 贪心策略的快捷创建（GreedyPolicy 的别名）"""
     
     def __init__(self, policy_name: str = "greedy_edf"):
-        super().__init__(sort_by="due", prefer_pad_switch=True, policy_name=policy_name)
-
-
-class WindowGreedyPolicy(GreedyPolicy):
-    """按窗口起点贪心的快捷创建"""
-    
-    def __init__(self, policy_name: str = "greedy_window"):
-        super().__init__(sort_by="window_start", prefer_pad_switch=False, policy_name=policy_name)
+        super().__init__(prefer_pad_switch=True, policy_name=policy_name)

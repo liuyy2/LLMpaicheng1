@@ -70,6 +70,10 @@ class EpisodeRecord:
     avg_solve_time_ms: float
     total_runtime_s: float
 
+    # 归一化稳定性指标（主指标）
+    drift_per_replan: float = 0.0
+    drift_per_day: float = 0.0
+
     # 补充指标
     avg_time_deviation_min: float = 0.0
     total_resource_switches: int = 0
@@ -123,6 +127,8 @@ def load_episode_results(filepath: str) -> List[EpisodeRecord]:
                 num_forced_replans=int(row['num_forced_replans']),
                 avg_solve_time_ms=float(row['avg_solve_time_ms']),
                 total_runtime_s=float(row['total_runtime_s']),
+                drift_per_replan=float(row.get('drift_per_replan', 0.0)),
+                drift_per_day=float(row.get('drift_per_day', 0.0)),
                 avg_time_deviation_min=float(row.get('avg_time_deviation_min', 0.0)),
                 total_resource_switches=int(float(row.get('total_resource_switches', 0))),
                 makespan_cmax=int(float(row.get('makespan_cmax', 0))),
@@ -316,6 +322,8 @@ def compute_summary_stats(
         # 核心指标
         delays = [r.avg_delay for r in recs]
         drifts = [r.episode_drift for r in recs]
+        drift_per_replans = [r.drift_per_replan for r in recs]
+        drift_per_days = [r.drift_per_day for r in recs]
         on_times = [r.on_time_rate for r in recs]
         weighted_tardinesses = [r.weighted_tardiness for r in recs]
         resource_utils = [r.resource_utilization for r in recs]
@@ -375,6 +383,10 @@ def compute_summary_stats(
             "CI_delay": ci95(delays),
             "mean_drift": mean(drifts),
             "CI_drift": ci95(drifts),
+            "mean_drift_per_replan": mean(drift_per_replans),
+            "CI_drift_per_replan": ci95(drift_per_replans),
+            "mean_drift_per_day": mean(drift_per_days),
+            "CI_drift_per_day": ci95(drift_per_days),
             "combined_mean": mean(combined),
             "combined_ci95": ci95(combined),
             "on_time_mean": mean(on_times),
@@ -556,26 +568,33 @@ def compute_main_table_by_disturbance(
         avg_delay_vals = [r.avg_delay for r in recs]
         max_delay_vals = [r.max_delay for r in recs]
         drift_vals = [r.episode_drift for r in recs]
+        drift_pr_vals = [r.drift_per_replan for r in recs]
         shifts_vals = [r.total_shifts for r in recs]
         switches_vals = [r.total_switches for r in recs]
         feasible_vals = [r.feasible_rate for r in recs]
         solve_vals = [r.avg_solve_time_ms for r in recs]
+        replans_vals = [r.num_replans for r in recs]
         mean_delay = mean(avg_delay_vals)
+        mean_delay_hours = mean_delay * 15.0 / 60.0  # slots → hours
 
         rows.append({
             "disturbance_level": level,
             "policy_name": policy,
             "n": len(recs),
             "avg_delay_mean": round(mean_delay, 3),
+            "avg_delay_hours": round(mean_delay_hours, 2),
             "avg_delay_std": round(std(avg_delay_vals), 3),
             "max_delay_mean": round(mean(max_delay_vals), 2),
             "max_delay_std": round(std(max_delay_vals), 2),
             "drift_mean": round(mean(drift_vals), 4),
             "drift_std": round(std(drift_vals), 4),
+            "drift_per_replan_mean": round(mean(drift_pr_vals), 6),
+            "drift_per_replan_std": round(std(drift_pr_vals), 6),
             "total_shifts_mean": round(mean(shifts_vals), 2),
             "total_shifts_std": round(std(shifts_vals), 2),
             "total_switches_mean": round(mean(switches_vals), 2),
             "total_switches_std": round(std(switches_vals), 2),
+            "num_replans_mean": round(mean(replans_vals), 2),
             "feasible_rate_mean": round(mean(feasible_vals), 4),
             "feasible_rate_std": round(std(feasible_vals), 4),
             "avg_solve_time_ms_mean": round(mean(solve_vals), 2),
@@ -820,12 +839,15 @@ def plot_episode_compare(
 # ============================================================================
 
 POLICY_STYLES = {
-    "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Fixed-Balanced"},
-    "fixed_default": {"color": "#3498db", "marker": "s", "label": "Delay-Only"},
-    "nofreeze": {"color": "#e74c3c", "marker": "^", "label": "No-Freeze"},
+    "fixed_tuned": {"color": "#2ecc71", "marker": "o", "label": "Two-Stage+Freeze"},
+    "fixed_default": {"color": "#3498db", "marker": "s", "label": "Single-Stage"},
+    "full_unlock": {"color": "#e74c3c", "marker": "^", "label": "Full-Unlock"},
     "mockllm": {"color": "#f39c12", "marker": "v", "label": "MockLLM"},
     "llm_real": {"color": "#1abc9c", "marker": "P", "label": "LLM (Real)"},
-    "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"}
+    "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"},
+    "ga_repair": {"color": "#9b59b6", "marker": "D", "label": "GA-Repair"},
+    "trcg_repair": {"color": "#e67e22", "marker": "P", "label": "TRCG-Repair"},
+    "greedy": {"color": "#95a5a6", "marker": "v", "label": "Greedy (EDF)"}
 }
 
 
@@ -837,37 +859,41 @@ def get_policy_style(policy_name: str) -> dict:
 
 
 # ============================================================================
-# 图表 1: Delay vs PlanDrift Scatter
+# 图表 1: Delay vs Drift/Replan Scatter (Pareto 图)
 # ============================================================================
 
 def plot_delay_vs_drift_scatter(
     records: List[EpisodeRecord],
     output_path: str,
     dataset: str = "test",
-    title: str = "Delay vs Plan Drift",
+    title: str = "Delay vs Drift per Replan",
     epsilon_threshold: Optional[float] = None
 ):
     """
-    绘制 Delay vs PlanDrift 散点图
+    绘制 Delay vs Drift/Replan 散点图（Pareto 图）
     
-    每个策略不同颜色和标记
+    Y 轴使用 drift_per_replan（归一化主指标），确保不同策略可比。
     """
-    # 按策略分组
+    # 按策略分组，将 delay 从 slots 转换为 hours (1 slot = 15 min)
+    SLOT_TO_HOURS = 15.0 / 60.0
     policy_data: Dict[str, Tuple[List[float], List[float]]] = defaultdict(lambda: ([], []))
     
     for rec in records:
         if rec.dataset != dataset:
             continue
-        policy_data[rec.policy_name][0].append(rec.avg_delay)
-        policy_data[rec.policy_name][1].append(rec.episode_drift)
+        policy_data[rec.policy_name][0].append(rec.avg_delay * SLOT_TO_HOURS)
+        policy_data[rec.policy_name][1].append(rec.drift_per_replan)
     
     if epsilon_threshold is None:
+        import numpy as np
         fig, ax = plt.subplots(figsize=(10, 8))
         # 绘制每个策略
         for policy_name, (delays, drifts) in policy_data.items():
             style = get_policy_style(policy_name)
+            # 添加轻微 jitter 避免完全重叠
+            delays_jittered = [d + np.random.uniform(-0.02, 0.02) for d in delays]
             ax.scatter(
-                delays, drifts,
+                delays_jittered, drifts,
                 c=style["color"],
                 marker=style["marker"],
                 label=style["label"],
@@ -876,8 +902,10 @@ def plot_delay_vs_drift_scatter(
                 edgecolors='white',
                 linewidths=0.5
             )
-        ax.set_xlabel("Average Delay (slots)", fontsize=12)
-        ax.set_ylabel("Episode Plan Drift", fontsize=12)
+        # 使用 symlog 刻度展示 0 附近和远离 0 的值
+        ax.set_xscale('symlog', linthresh=0.1)
+        ax.set_xlabel("Average Delay (hours, symlog scale)", fontsize=12)
+        ax.set_ylabel("Drift per Replan", fontsize=12)
         ax.set_title(f"{title} ({dataset} set)", fontsize=14)
         ax.legend(loc="upper right", fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -888,6 +916,8 @@ def plot_delay_vs_drift_scatter(
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
     else:
+        # Convert epsilon_threshold from slots to hours for consistent comparison
+        eps_thresh_hours = epsilon_threshold * SLOT_TO_HOURS if epsilon_threshold else 0
         fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
         panels = [("All", False), ("Feasible Only", True)]
         for ax, (panel_title, feasible_only) in zip(axes, panels):
@@ -896,7 +926,7 @@ def plot_delay_vs_drift_scatter(
                 pts = [
                     (d, dr)
                     for d, dr in zip(delays, drifts)
-                    if (d <= epsilon_threshold or not feasible_only)
+                    if (d <= eps_thresh_hours or not feasible_only)
                 ]
                 if not pts:
                     continue
@@ -911,20 +941,20 @@ def plot_delay_vs_drift_scatter(
                     edgecolors='white',
                     linewidths=0.5
                 )
-            ax.set_xlabel("Average Delay (slots)", fontsize=11)
+            ax.set_xlabel("Average Delay (hours)", fontsize=11)
             ax.set_title(f"{title} ({dataset} set) - {panel_title}", fontsize=12)
             ax.grid(True, alpha=0.3)
             ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
             ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
             ax.axvline(
-                x=epsilon_threshold,
+                x=eps_thresh_hours,
                 color='black',
                 linestyle='--',
                 alpha=0.7,
                 label='epsilon threshold' if not feasible_only else None
             )
-            ax.axvspan(0, epsilon_threshold, color='green', alpha=0.04)
-        axes[0].set_ylabel("Episode Plan Drift", fontsize=11)
+            ax.axvspan(0, eps_thresh_hours, color='green', alpha=0.04)
+        axes[0].set_ylabel("Drift per Replan", fontsize=11)
         axes[0].legend(loc="upper right", fontsize=9)
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -1109,6 +1139,101 @@ def plot_llm_vs_solver_time(
 # 额外图表
 # ============================================================================
 
+# ============================================================================
+# Figure 3: 总体效果分布图（ECDF + Box Plot）
+# ============================================================================
+
+def plot_distribution_comparison(
+    records: List[EpisodeRecord],
+    output_path: str,
+    dataset: str = "test"
+):
+    """
+    绘制 Figure 3: 总体效果分布图（两子图）。
+
+    子图 A: avg_delay 的 ECDF + 嵌入 box plot
+    子图 B: drift_per_replan 的 ECDF + 嵌入 box plot
+
+    每条策略一条 ECDF 线，便于读者看 "你的方法 CDF 整体偏左"。
+    """
+    import numpy as np
+
+    # 按策略收集数据
+    policy_data: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: {"delay": [], "drift_pr": []})
+    for rec in records:
+        if rec.dataset != dataset:
+            continue
+        policy_data[rec.policy_name]["delay"].append(rec.avg_delay)
+        policy_data[rec.policy_name]["drift_pr"].append(rec.drift_per_replan)
+
+    if not policy_data:
+        print(f"No data for dataset={dataset}, skip distribution plot")
+        return
+
+    policies = sorted(policy_data.keys())
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    metric_configs = [
+        ("delay", "Average Delay (slots)", "avg_delay"),
+        ("drift_pr", "Drift per Replan", "drift_per_replan"),
+    ]
+
+    for ax, (key, xlabel, metric_name) in zip(axes, metric_configs):
+        # --- ECDF ---
+        for policy in policies:
+            vals = sorted(policy_data[policy][key])
+            if not vals:
+                continue
+            style = get_policy_style(policy)
+            n = len(vals)
+            ecdf_y = np.arange(1, n + 1) / n
+            ax.step(vals, ecdf_y,
+                    where='post',
+                    color=style["color"],
+                    label=style["label"],
+                    linewidth=2,
+                    alpha=0.85)
+
+        ax.set_xlabel(xlabel, fontsize=12)
+        ax.set_ylabel("Cumulative Probability", fontsize=12)
+        ax.set_title(f"ECDF of {xlabel} ({dataset} set)", fontsize=13)
+        ax.legend(loc="lower right", fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.02, 1.05)
+
+        # --- Inset box plot ---
+        inset = ax.inset_axes([0.55, 0.08, 0.42, 0.32])  # [x, y, w, h] in axes coords
+        bp_data = []
+        bp_labels = []
+        bp_colors = []
+        for policy in policies:
+            vals = policy_data[policy][key]
+            if vals:
+                bp_data.append(vals)
+                bp_labels.append(get_policy_style(policy)["label"])
+                bp_colors.append(get_policy_style(policy)["color"])
+
+        if bp_data:
+            bp = inset.boxplot(bp_data, labels=bp_labels, patch_artist=True,
+                               widths=0.5, showfliers=True,
+                               flierprops=dict(marker='o', markersize=3, alpha=0.5))
+            for patch, color in zip(bp['boxes'], bp_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.6)
+            inset.tick_params(axis='x', labelsize=7, rotation=20)
+            inset.tick_params(axis='y', labelsize=7)
+            inset.set_ylabel(xlabel, fontsize=7)
+            inset.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"保存图表: {output_path}")
+
+
+# ============================================================================
+
 def plot_policy_comparison_bars(
     stats: Dict[Tuple[str, str], Dict[str, Any]],
     output_path: str,
@@ -1140,7 +1265,9 @@ def plot_policy_comparison_bars(
         "mean_avg_time_deviation_min": "CI_avg_time_deviation_min",
         "mean_total_resource_switches": "CI_total_resource_switches",
         "mean_makespan_cmax": "CI_makespan_cmax",
-        "mean_util_r_pad": "CI_util_r_pad"
+        "mean_util_r_pad": "CI_util_r_pad",
+        "mean_drift_per_replan": "CI_drift_per_replan",
+        "mean_drift_per_day": "CI_drift_per_day"
     }
     cis = []
     for p in policy_names:
@@ -1202,19 +1329,41 @@ def plot_metric_by_disturbance(
     x = range(len(levels))
     width = 0.12
     
+    all_values = []
+    bars_data = []  # 保存 bar 对象和值用于标注
+    
     for i, policy in enumerate(policies):
         style = get_policy_style(policy)
         values = [mean(groups.get((policy, level), [0])) for level in levels]
+        all_values.extend(values)
         offset = (i - len(policies)/2 + 0.5) * width
         
-        ax.bar([xi + offset for xi in x], values,
-               width=width, label=style["label"],
-               color=style["color"], alpha=0.8)
+        bars = ax.bar([xi + offset for xi in x], values,
+                       width=width, label=style["label"],
+                       color=style["color"], alpha=0.8)
+        bars_data.append((bars, values))
+    
+    # 自动判断是否使用 symlog 刻度
+    max_val = max(all_values) if all_values else 1
+    min_val = min([v for v in all_values if v > 0], default=0.001)
+    if max_val / min_val > 20:  # 值域跨度大时使用 symlog
+        ax.set_yscale('symlog', linthresh=0.1)
+        ax.set_ylabel(f"{ylabel} (symlog scale)", fontsize=12)
+    else:
+        ax.set_ylabel(ylabel, fontsize=12)
+    
+    # 添加数值标注
+    for bars, values in bars_data:
+        for bar, val in zip(bars, values):
+            if val > 0.001:  # 只标注非零值
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{val:.3f}' if val < 1 else f'{val:.2f}',
+                        ha='center', va='bottom', fontsize=7, rotation=0)
     
     ax.set_xticks(x)
     ax.set_xticklabels(["Light", "Medium", "Heavy"])
     ax.set_xlabel("Disturbance Level", fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(f"{ylabel} by Disturbance Level ({dataset} set)", fontsize=14)
     ax.legend(loc="upper left", fontsize=9, ncol=2)
     ax.grid(True, axis='y', alpha=0.3)
@@ -1223,6 +1372,205 @@ def plot_metric_by_disturbance(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
+    print(f"保存图表: {output_path}")
+
+
+# ============================================================================
+# Plan A: 相对改善面板（Relative Improvement Panel）
+# ============================================================================
+
+def plot_relative_improvement_panel(
+    records: List[EpisodeRecord],
+    output_path: str,
+    baseline_policy: str = "fixed_default",
+    dataset: str = "test",
+):
+    """
+    相对改善面板图：
+    - 2 行子图：上 = avg_delay，下 = drift_per_replan
+    - X 轴 = 扰动等级 (Light / Medium / Heavy)
+    - Y 轴 = 相对 baseline 的改善百分比 (正值 = 更好)
+    - 每条策略一条折线 + 95% CI error bar
+
+    方案 A 的核心思路：突出各策略在不同扰动下的相对优势差异。
+    """
+    import numpy as np
+
+    levels = ["light", "medium", "heavy"]
+    level_labels = ["Light", "Medium", "Heavy"]
+    metrics = [("avg_delay", "Average Delay — Relative Improvement (%)"),
+               ("drift_per_replan", "Drift per Replan — Relative Improvement (%)")]
+
+    # 收集数据: {(policy, level, metric)} -> [values]
+    groups: Dict[Tuple[str, str, str], List[float]] = defaultdict(list)
+    for rec in records:
+        if rec.dataset != dataset:
+            continue
+        for metric_name, _ in metrics:
+            groups[(rec.policy_name, rec.disturbance_level, metric_name)].append(
+                getattr(rec, metric_name)
+            )
+
+    policies = sorted(set(
+        k[0] for k in groups.keys() if k[0] != baseline_policy
+    ))
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    for ax, (metric_name, ylabel) in zip(axes, metrics):
+        for policy in policies:
+            means = []
+            ci_lows = []
+            ci_highs = []
+            for level in levels:
+                baseline_vals = groups.get((baseline_policy, level, metric_name), [])
+                policy_vals = groups.get((policy, level, metric_name), [])
+                if not baseline_vals or not policy_vals:
+                    means.append(0.0)
+                    ci_lows.append(0.0)
+                    ci_highs.append(0.0)
+                    continue
+
+                bl_mean = np.mean(baseline_vals)
+                if abs(bl_mean) < 1e-9:
+                    # baseline 接近 0，使用绝对差
+                    improvements = [-(pv - bl_mean) for pv in policy_vals]
+                else:
+                    # 相对改善 = (baseline - policy) / |baseline| * 100
+                    improvements = [(bl_mean - pv) / abs(bl_mean) * 100
+                                    for pv in policy_vals]
+
+                m = np.mean(improvements)
+                if len(improvements) > 1:
+                    se = np.std(improvements, ddof=1) / np.sqrt(len(improvements))
+                    ci = 1.96 * se
+                else:
+                    ci = 0.0
+                means.append(m)
+                ci_lows.append(ci)
+                ci_highs.append(ci)
+
+            style = get_policy_style(policy)
+            x = np.arange(len(levels))
+            ax.errorbar(
+                x, means,
+                yerr=[ci_lows, ci_highs],
+                label=style["label"],
+                color=style["color"],
+                marker=style["marker"],
+                linewidth=2,
+                capsize=4,
+                markersize=7,
+            )
+
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.6,
+                    label=f"Baseline ({baseline_policy})")
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.legend(loc="best", fontsize=8, ncol=2)
+        ax.grid(True, axis='y', alpha=0.3)
+
+    axes[-1].set_xticks(range(len(levels)))
+    axes[-1].set_xticklabels(level_labels, fontsize=11)
+    axes[-1].set_xlabel("Disturbance Level", fontsize=12)
+    axes[0].set_title(
+        f"Relative Improvement vs Baseline ({dataset} set)", fontsize=13
+    )
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"保存图表: {output_path}")
+
+
+# ============================================================================
+# Plan B: 按扰动等级分面散点图 + Pareto front
+# ============================================================================
+
+def plot_scatter_by_disturbance_facets(
+    records: List[EpisodeRecord],
+    output_path: str,
+    dataset: str = "test",
+):
+    """
+    按扰动等级分面散点图：
+    - 3 列子图：Light | Medium | Heavy
+    - X = avg_delay (hours)，Y = drift_per_replan
+    - 每个策略用不同颜色 / marker
+    - 每个子图叠加该策略的 Pareto front 连线
+
+    方案 B 的核心思路：在每个扰动等级中直观展示各策略的 delay-drift 权衡位置。
+    """
+    import numpy as np
+
+    SLOT_TO_HOURS = 15.0 / 60.0
+    levels = ["light", "medium", "heavy"]
+    level_labels = ["Light", "Medium", "Heavy"]
+
+    # 收集: {(policy, level)} -> [(delay_h, drift)]
+    scatter_data: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
+    for rec in records:
+        if rec.dataset != dataset:
+            continue
+        scatter_data[(rec.policy_name, rec.disturbance_level)].append(
+            (rec.avg_delay * SLOT_TO_HOURS, rec.drift_per_replan)
+        )
+
+    policies = sorted(set(k[0] for k in scatter_data.keys()))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5), sharey=True)
+
+    for ax, level, label in zip(axes, levels, level_labels):
+        for policy in policies:
+            pts = scatter_data.get((policy, level), [])
+            if not pts:
+                continue
+            style = get_policy_style(policy)
+            xs, ys = zip(*pts)
+            # 轻微 jitter 防止完全重叠
+            xs_j = [x + np.random.uniform(-0.01, 0.01) for x in xs]
+            ax.scatter(
+                xs_j, ys,
+                c=style["color"],
+                marker=style["marker"],
+                label=style["label"],
+                alpha=0.7,
+                s=50,
+                edgecolors='white',
+                linewidths=0.5,
+            )
+
+            # Pareto front: 按 delay 排序，保留非支配点
+            sorted_pts = sorted(pts, key=lambda p: p[0])
+            pareto = []
+            best_drift = float('inf')
+            for dx, dy in sorted_pts:
+                if dy < best_drift:
+                    pareto.append((dx, dy))
+                    best_drift = dy
+            if len(pareto) >= 2:
+                px, py = zip(*pareto)
+                ax.plot(px, py, color=style["color"], linewidth=1.2,
+                        linestyle='--', alpha=0.5)
+
+        ax.set_title(label, fontsize=13, fontweight='bold')
+        ax.set_xlabel("Average Delay (hours)", fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.4)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.4)
+
+    axes[0].set_ylabel("Drift per Replan", fontsize=11)
+
+    # 统一图例（只取最后一个子图的 handles 避免重复）
+    handles, labels = axes[-1].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center',
+               ncol=min(len(policies), 6),
+               fontsize=9, bbox_to_anchor=(0.5, -0.02))
+
+    fig.suptitle(f"Delay vs Drift by Disturbance Level ({dataset} set)",
+                 fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
     print(f"保存图表: {output_path}")
 
 
@@ -1453,6 +1801,8 @@ def save_summary_csv(
         "dataset", "policy_name", "n",
         "mean_delay", "CI_delay",
         "mean_drift", "CI_drift",
+        "mean_drift_per_replan", "CI_drift_per_replan",
+        "mean_drift_per_day", "CI_drift_per_day",
         "combined_mean", "combined_ci95",
         "on_time_mean",
         "mean_weighted_tardiness", "CI_weighted_tardiness",
@@ -1481,6 +1831,10 @@ def save_summary_csv(
             "CI_delay": round(s["CI_delay"], 3),
             "mean_drift": round(s["mean_drift"], 5),
             "CI_drift": round(s["CI_drift"], 5),
+            "mean_drift_per_replan": round(s["mean_drift_per_replan"], 6),
+            "CI_drift_per_replan": round(s["CI_drift_per_replan"], 6),
+            "mean_drift_per_day": round(s["mean_drift_per_day"], 6),
+            "CI_drift_per_day": round(s["CI_drift_per_day"], 6),
             "combined_mean": round(s["combined_mean"], 3),
             "combined_ci95": round(s["combined_ci95"], 3),
             "on_time_mean": round(s["on_time_mean"], 4),
@@ -1582,6 +1936,7 @@ def save_enhanced_summary_with_tests(
         "dataset", "policy_name", "n",
         "mean_delay", "CI_delay",
         "mean_drift", "CI_drift",
+        "mean_drift_per_replan", "CI_drift_per_replan",
         "combined_mean", "combined_ci95",
         "on_time_mean",
         "mean_weighted_tardiness", "CI_weighted_tardiness",
@@ -1610,6 +1965,8 @@ def save_enhanced_summary_with_tests(
             "CI_delay": round(s["CI_delay"], 3),
             "mean_drift": round(s["mean_drift"], 5),
             "CI_drift": round(s["CI_drift"], 5),
+            "mean_drift_per_replan": round(s["mean_drift_per_replan"], 6),
+            "CI_drift_per_replan": round(s["CI_drift_per_replan"], 6),
             "combined_mean": round(s["combined_mean"], 3),
             "combined_ci95": round(s["combined_ci95"], 3),
             "on_time_mean": round(s["on_time_mean"], 4),
@@ -1831,8 +2188,8 @@ def print_summary_table(stats: Dict[Tuple[str, str], Dict[str, Any]], dataset: s
         return
     
     # 简化表头
-    headers = ["Policy", "N", "Delay", "Drift", "Replans", "Switch", "Fallback%", "Cache%"]
-    widths = [15, 5, 15, 15, 8, 8, 10, 10]
+    headers = ["Policy", "N", "Delay", "Drift/Replan", "Drift", "Replans", "Switch", "Fallback%"]
+    widths = [15, 5, 15, 18, 15, 8, 8, 10]
     
     header_line = "│"
     for h, w in zip(headers, widths):
@@ -1854,11 +2211,11 @@ def print_summary_table(stats: Dict[Tuple[str, str], Dict[str, Any]], dataset: s
             policy_label[:15],
             str(s["n"]),
             f"{s['mean_delay']:.2f}±{s['CI_delay']:.2f}",
+            f"{s['mean_drift_per_replan']:.4f}±{s['CI_drift_per_replan']:.4f}",
             f"{s['mean_drift']:.4f}±{s['CI_drift']:.4f}",
             f"{s['mean_replans']:.1f}",
             f"{s['mean_switch']:.1f}",
-            f"{s['fallback_rate']:.1%}",
-            f"{s['cache_hit_rate']:.1%}"
+            f"{s['fallback_rate']:.1%}"
         ]
         
         row_line = "│"
@@ -1890,7 +2247,7 @@ def run_analysis(
     best_params_path: Optional[str] = None,
     episode_seed: Optional[int] = None,
     episode_policy_a: str = "fixed_tuned",
-    episode_policy_b: str = "nofreeze"
+    episode_policy_b: str = "full_unlock"
 ):
     """
     运行完整分析流程
@@ -1927,10 +2284,14 @@ def run_analysis(
     print(f"主数据集: {primary_dataset}")
 
     if policies is None:
-        policies = ["fixed_default", "fixed_tuned", "nofreeze"]
-    policies = [p for p in policies if p in available_policies]
+        # 使用所有可用策略（排除有 bug 的）
+        policies = sorted(available_policies)
+    else:
+        policies = [p for p in policies if p in available_policies]
     if not policies:
         policies = sorted(available_policies)
+    
+    print(f"分析策略: {policies}")
 
     logs_dir = logs_dir or os.path.join(input_dir, "logs")
     baseline_policy = "fixed_default"
@@ -1996,21 +2357,12 @@ def run_analysis(
     roll_rows = collect_roll_metrics(logs_dir, record_index)
     roll_stats_path = os.path.join(output_dir, "roll_feasibility_stats.csv")
     save_roll_feasibility_stats(roll_rows, roll_stats_path, policies=policies)
-
-    if episode_seed is not None:
-        episode_compare_path = os.path.join(output_dir, "episode_compare.png")
-        plot_episode_compare(
-            logs_dir=logs_dir,
-            seed=episode_seed,
-            policy_a=episode_policy_a,
-            policy_b=episode_policy_b,
-            output_path=episode_compare_path
-        )
     
     # 6. 生成图表
     print("\n生成图表...")
     
     # 图表 1: Delay vs Drift 散点图
+    # 图表 1: Delay vs Drift/Replan 散点图（Pareto 图）
     plot_delay_vs_drift_scatter(
         records,
         os.path.join(output_dir, "delay_vs_drift_scatter.png"),
@@ -2025,23 +2377,7 @@ def run_analysis(
         dataset=primary_dataset
     )
     
-    # 图表 3: LLM Time vs Solver Time
-    if include_llm:
-        plot_llm_vs_solver_time(
-            records,
-            os.path.join(output_dir, "llm_vs_solver_time.png"),
-            dataset=primary_dataset
-        )
-    
-    # 额外图表
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_combined.png"),
-        dataset=primary_dataset,
-        metric="combined_mean",
-        ylabel="Normalized Cost (baseline=1.0)"
-    )
-    
+    # 图表 3: 策略延迟对比
     plot_policy_comparison_bars(
         stats,
         os.path.join(output_dir, "policy_comparison_delay.png"),
@@ -2050,121 +2386,515 @@ def run_analysis(
         ylabel="Average Delay (slots)"
     )
 
+    # 图表 3b: 策略 drift_per_replan 对比
     plot_policy_comparison_bars(
         stats,
-        os.path.join(output_dir, "policy_comparison_weighted_tardiness.png"),
+        os.path.join(output_dir, "policy_comparison_drift_per_replan.png"),
         dataset=primary_dataset,
-        metric="mean_weighted_tardiness",
-        ylabel="Weighted Tardiness"
+        metric="mean_drift_per_replan",
+        ylabel="Drift per Replan (main stability metric)"
     )
 
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_resource_utilization.png"),
-        dataset=primary_dataset,
-        metric="mean_resource_utilization",
-        ylabel="Resource Utilization"
+    # Figure 3: 总体效果分布图（ECDF + box plot）
+    plot_distribution_comparison(
+        records,
+        os.path.join(output_dir, "fig3_distribution_comparison.png"),
+        dataset=primary_dataset
     )
 
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_util_r_pad.png"),
-        dataset=primary_dataset,
-        metric="mean_util_r_pad",
-        ylabel="Utilization (R_pad)"
-    )
-
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_makespan_cmax.png"),
-        dataset=primary_dataset,
-        metric="mean_makespan_cmax",
-        ylabel="Makespan Cmax (slots)"
-    )
-
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_avg_time_deviation_min.png"),
-        dataset=primary_dataset,
-        metric="mean_avg_time_deviation_min",
-        ylabel="Avg Time Deviation (min)"
-    )
-
-    plot_policy_comparison_bars(
-        stats,
-        os.path.join(output_dir, "policy_comparison_total_resource_switches.png"),
-        dataset=primary_dataset,
-        metric="mean_total_resource_switches",
-        ylabel="Total Resource Switches"
-    )
-    
+    # Figure 5: 鲁棒性 — 扰动强度分层结果（分组柱状图）
     plot_metric_by_disturbance(
         records,
-        os.path.join(output_dir, "delay_by_disturbance.png"),
+        os.path.join(output_dir, "fig5_robustness_delay.png"),
         metric="avg_delay",
-        ylabel="Average Delay",
+        ylabel="Average Delay (slots)",
         dataset=primary_dataset
     )
-    
     plot_metric_by_disturbance(
         records,
-        os.path.join(output_dir, "drift_by_disturbance.png"),
-        metric="episode_drift",
-        ylabel="Episode Drift",
+        os.path.join(output_dir, "fig5_robustness_drift_per_replan.png"),
+        metric="drift_per_replan",
+        ylabel="Drift per Replan",
         dataset=primary_dataset
     )
-    
-    # ??????? tuning_results ????
-    can_plot_tuning = bool(tuning_results) and all(
-        "epsilon_solver" in r and "freeze_horizon_slots" in r for r in tuning_results
-    )
-    if can_plot_tuning:
-        plot_tuning_heatmap(
-            tuning_results,
-            os.path.join(output_dir, "tuning_heatmap.png")
-        )
-    else:
-        print("Skip tuning heatmap: tuning_results empty or missing fields")
 
-    # Feature buckets and Gantt chart (if logs exist)
+    # Feature buckets table
     save_feature_bucket_table(input_dir, os.path.join(output_dir, "feature_bucket_table.csv"))
-    plot_gantt_from_schedule(input_dir, os.path.join(output_dir, "gantt_chart.png"))
-    
-    # 7. LLM Reliability Report（如果有 llm_real 数据）
-    if include_llm and "llm_real" in available_policies:
-        report_path = os.path.join(output_dir, "reliability_report.md")
-        generate_llm_reliability_report(records, report_path, dataset=primary_dataset)
-    
+
+    # Figure 6a: 相对改善面板 (Plan A)
+    plot_relative_improvement_panel(
+        records,
+        os.path.join(output_dir, "fig6a_relative_improvement.png"),
+        baseline_policy="fixed_default",
+        dataset=primary_dataset
+    )
+
+    # Figure 6b: 按扰动等级分面散点图 (Plan B)
+    plot_scatter_by_disturbance_facets(
+        records,
+        os.path.join(output_dir, "fig6b_scatter_by_disturbance.png"),
+        dataset=primary_dataset
+    )
+
     # 完成
     print(f"\n{'='*70}")
     print(" 分析完成！")
     print(f"{'='*70}")
     print(f"输出文件:")
-    print(f"  - {summary_path}")
-    print(f"  - {enhanced_path}")
-    print(f"  - {output_dir}/main_table_by_disturbance.csv")
-    print(f"  - {output_dir}/budgeted_best_drift.csv")
-    print(f"  - {output_dir}/roll_feasibility_stats.csv")
-    if episode_seed is not None:
-        print(f"  - {output_dir}/episode_compare.png")
-    print(f"  - {output_dir}/delay_vs_drift_scatter.png")
-    print(f"  - {output_dir}/replans_switches_boxplot.png")
-    if include_llm:
-        print(f"  - {output_dir}/llm_vs_solver_time.png")
-    print(f"  - {output_dir}/policy_comparison_*.png")
-    print(f"  - {output_dir}/policy_comparison_util_r_pad.png")
-    print(f"  - {output_dir}/policy_comparison_makespan_cmax.png")
-    print(f"  - {output_dir}/policy_comparison_avg_time_deviation_min.png")
-    print(f"  - {output_dir}/policy_comparison_total_resource_switches.png")
-    print(f"  - {output_dir}/delay_by_disturbance.png")
-    print(f"  - {output_dir}/drift_by_disturbance.png")
-    if can_plot_tuning:
-        print(f"  - {output_dir}/tuning_heatmap.png")
-    if include_llm and "llm_real" in available_policies:
-        print(f"  - {output_dir}/reliability_report.md")
+    print(f"  CSV文件:")
+    print(f"    - {summary_path}")
+    print(f"    - {enhanced_path}")
+    print(f"    - {output_dir}/main_table_by_disturbance.csv")
+    print(f"    - {output_dir}/budgeted_best_drift.csv")
+    print(f"    - {output_dir}/roll_feasibility_stats.csv")
+    print(f"    - {output_dir}/feature_bucket_table.csv")
+    print(f"  图表:")
+    print(f"    - {output_dir}/delay_vs_drift_scatter.png   (Figure 4: Pareto)")
+    print(f"    - {output_dir}/replans_switches_boxplot.png")
+    print(f"    - {output_dir}/policy_comparison_delay.png")
+    print(f"    - {output_dir}/policy_comparison_drift_per_replan.png")
+    print(f"    - {output_dir}/fig3_distribution_comparison.png  (Figure 3: 分布)")
+    print(f"    - {output_dir}/fig5_robustness_delay.png         (Figure 5a: 鲁棒性)")
+    print(f"    - {output_dir}/fig5_robustness_drift_per_replan.png (Figure 5b: 鲁棒性)")
+    print(f"    - {output_dir}/fig6a_relative_improvement.png    (Figure 6a: 相对改善)")
+    print(f"    - {output_dir}/fig6b_scatter_by_disturbance.png  (Figure 6b: 分面散点)")
     
     if show_plots:
         plt.show()
+
+
+# ============================================================================
+# Episode Case Study Figure（论文用单图：Pad 双泳道 + Rolling 指标）
+# ============================================================================
+
+def _load_rolling_log(log_path: str) -> List[dict]:
+    """读取 rolling_log.jsonl，返回按 t 排序的 snapshot 列表。"""
+    snapshots = []
+    with open(log_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                snapshots.append(json.loads(line))
+    snapshots.sort(key=lambda s: s['t'])
+    return snapshots
+
+
+def _extract_pad_holds(snapshots: List[dict]) -> List[dict]:
+    """
+    从每个 rolling snapshot 中提取 PadHold 区间。
+    PadHold = [min(start) among Op4/Op5/Op6, max(end) among Op4/Op5/Op6]
+    对于每个 mission。
+
+    返回列表：每项 = {roll_idx, t, mission_id, pad_start, pad_end}
+    """
+    records = []
+    for roll_idx, snap in enumerate(snapshots):
+        plan = snap.get('plan')
+        if not plan:
+            continue
+        assignments = plan.get('op_assignments', [])
+        # 按 mission 分组，只取使用 R_pad 的 ops
+        mission_pad_ops: Dict[str, List[dict]] = defaultdict(list)
+        for a in assignments:
+            resources = a.get('resources', [])
+            if 'R_pad' in resources:
+                mission_pad_ops[a['mission_id']].append(a)
+        for mid, ops in mission_pad_ops.items():
+            pad_start = min(op['start_slot'] for op in ops)
+            pad_end = max(op['end_slot'] for op in ops)
+            records.append({
+                'roll_idx': roll_idx,
+                't': snap['t'],
+                'mission_id': mid,
+                'pad_start': pad_start,
+                'pad_end': pad_end,
+            })
+    return records
+
+
+def _compute_pad_changes(pad_holds: List[dict], tol: int = 0) -> List[dict]:
+    """
+    对比相邻滚动步，检测每个 mission 的 PadHold 变化。
+    返回列表：每项 = {roll_idx, t, mission_id, pad_start, pad_end, changed: bool}
+    """
+    # 按 roll_idx 分组
+    by_roll: Dict[int, Dict[str, dict]] = defaultdict(dict)
+    for rec in pad_holds:
+        by_roll[rec['roll_idx']][rec['mission_id']] = rec
+
+    roll_indices = sorted(by_roll.keys())
+    results = []
+    prev_map: Dict[str, dict] = {}
+    for ridx in roll_indices:
+        cur_map = by_roll[ridx]
+        for mid, rec in cur_map.items():
+            changed = False
+            if mid in prev_map:
+                old = prev_map[mid]
+                if (abs(rec['pad_start'] - old['pad_start']) > tol or
+                        abs(rec['pad_end'] - old['pad_end']) > tol):
+                    changed = True
+            else:
+                # 新出现的 mission（首次被排入计划），不算 change
+                changed = False
+            results.append({**rec, 'changed': changed})
+        # TODO: 更精细的过滤——排除已完成、已开始、在冻结区内的任务。
+        # 当前为简单版本，直接比较数值变化。
+        prev_map = cur_map
+    return results
+
+
+def _detect_disturbance_slots(scenario_path: str) -> List[int]:
+    """从 scenario.json 提取扰动触发时刻。"""
+    if not os.path.exists(scenario_path):
+        return []
+    with open(scenario_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    timeline = data.get('disturbance_timeline', [])
+    return sorted(set(e.get('trigger_time', 0) for e in timeline))
+
+
+def plot_episode_case_study(
+    results_dir: str,
+    seed: int,
+    policy_baseline: str,
+    policy_ours: str,
+    outpath: str,
+    focus_center_slot: Optional[int] = None,
+    pre: int = 48,
+    post: int = 192,
+    tol: int = 0,
+    slot_minutes: int = 15,
+    disturbance_level: str = "heavy",
+):
+    """
+    绘制 Episode Case Study 论文图（单图两子图）。
+
+    上半图：Pad 双泳道对比（baseline vs ours），PadHold 段按 mission 着色，
+            变化段用黑色描边高亮。
+    下半图：Rolling drift 曲线 + PadHold changes 柱状图。
+
+    Args:
+        results_dir: batch_10day 目录路径（包含 {level}_{policy}_seed{seed}/ 子目录）
+        seed: episode seed
+        policy_baseline: baseline 策略名（如 "fixed_tuned"）
+        policy_ours: 我们的策略名（如 "full_unlock"）
+        outpath: 输出 PNG 路径
+        focus_center_slot: 聚焦中心 slot；None 则自动选择
+        pre: 聚焦窗口前端偏移（slots）
+        post: 聚焦窗口后端偏移（slots）
+        tol: 变化检测容差（slots）
+        slot_minutes: 每 slot 分钟数
+        disturbance_level: 扰动等级（用于定位子目录名）
+    """
+    import numpy as np
+    from matplotlib.patches import FancyBboxPatch
+    import matplotlib.colors as mcolors
+
+    # ------------------------------------------------------------------
+    # 1. 定位数据文件
+    # ------------------------------------------------------------------
+    def _find_episode_dir(policy: str) -> Optional[str]:
+        """尝试多种命名模式定位 episode 目录。"""
+        patterns = [
+            os.path.join(results_dir, f"{disturbance_level}_{policy}_seed{seed}"),
+            os.path.join(results_dir, f"{policy}_seed{seed}"),
+        ]
+        for p in patterns:
+            if os.path.isdir(p):
+                return p
+        # fallback: 遍历查找
+        if os.path.isdir(results_dir):
+            for name in os.listdir(results_dir):
+                full = os.path.join(results_dir, name)
+                if os.path.isdir(full) and policy in name and f"seed{seed}" in name:
+                    return full
+        return None
+
+    dir_bl = _find_episode_dir(policy_baseline)
+    dir_ours = _find_episode_dir(policy_ours)
+
+    if not dir_bl:
+        print(f"[ERROR] 找不到 baseline episode 目录: policy={policy_baseline}, seed={seed}")
+        return
+    if not dir_ours:
+        print(f"[ERROR] 找不到 ours episode 目录: policy={policy_ours}, seed={seed}")
+        return
+
+    log_bl_path = os.path.join(dir_bl, "rolling_log.jsonl")
+    log_ours_path = os.path.join(dir_ours, "rolling_log.jsonl")
+    for p, label in [(log_bl_path, "baseline"), (log_ours_path, "ours")]:
+        if not os.path.exists(p):
+            print(f"[ERROR] 找不到 {label} 的 rolling_log.jsonl: {p}")
+            return
+
+    # 扰动信息——优先从 baseline 目录读取
+    scenario_path = os.path.join(dir_bl, "scenario.json")
+    disturbance_slots = _detect_disturbance_slots(scenario_path)
+    if not disturbance_slots:
+        scenario_path2 = os.path.join(dir_ours, "scenario.json")
+        disturbance_slots = _detect_disturbance_slots(scenario_path2)
+
+    # ------------------------------------------------------------------
+    # 2. 加载并处理数据
+    # ------------------------------------------------------------------
+    snaps_bl = _load_rolling_log(log_bl_path)
+    snaps_ours = _load_rolling_log(log_ours_path)
+
+    holds_bl = _extract_pad_holds(snaps_bl)
+    holds_ours = _extract_pad_holds(snaps_ours)
+
+    changes_bl = _compute_pad_changes(holds_bl, tol=tol)
+    changes_ours = _compute_pad_changes(holds_ours, tol=tol)
+
+    # ------------------------------------------------------------------
+    # 3. 确定 focus window
+    # ------------------------------------------------------------------
+    if focus_center_slot is None:
+        # 自动选择：changes 峰值最大的滚动步对应的 now
+        change_count_by_roll: Dict[int, int] = defaultdict(int)
+        for rec in changes_bl + changes_ours:
+            if rec['changed']:
+                change_count_by_roll[rec['t']] += 1
+        if change_count_by_roll:
+            focus_center_slot = max(
+                change_count_by_roll.keys(),
+                key=lambda k: change_count_by_roll[k]
+            )
+        else:
+            # fallback: 第一个扰动时刻或中点
+            if disturbance_slots:
+                focus_center_slot = disturbance_slots[0]
+            else:
+                all_t = [s['t'] for s in snaps_bl]
+                focus_center_slot = all_t[len(all_t) // 2] if all_t else 480
+
+    assert focus_center_slot is not None  # help type-checker
+    win_start = max(0, focus_center_slot - pre)
+    win_end = focus_center_slot + post
+
+    # ------------------------------------------------------------------
+    # 4. 获取"最终快照"中每个 mission 的 PadHold（用于上半图展示）
+    # ------------------------------------------------------------------
+    def _last_snapshot_pad_holds(change_records: List[dict]) -> Dict[str, dict]:
+        """对每个 mission 取最后一次 rolling step 的 PadHold 记录。"""
+        last: Dict[str, dict] = {}
+        for rec in change_records:
+            mid = rec['mission_id']
+            if mid not in last or rec['roll_idx'] > last[mid]['roll_idx']:
+                last[mid] = rec
+        return last
+
+    def _build_swim_lane_data(change_records: List[dict],
+                              win_s: int, win_e: int) -> List[dict]:
+        """
+        为泳道构建绘图数据：取每个 rolling step 的每个 mission 的 PadHold，
+        裁剪到焦点窗口内。标记是否 changed。
+        """
+        # 按 roll_idx 分组，取最后一个 roll_idx 的计划作为"最终视图"
+        # 但更好的方式：显示所有 rolling step 的排布变化
+        # 为了可读性，我们取每个 mission 在所有 rolling step 中的"最终计划"
+        # 并用 changed 标记该 mission 在聚焦窗口内是否曾发生过变化
+        by_mission: Dict[str, List[dict]] = defaultdict(list)
+        for rec in change_records:
+            by_mission[rec['mission_id']].append(rec)
+
+        result = []
+        for mid, recs in by_mission.items():
+            recs_sorted = sorted(recs, key=lambda r: r['roll_idx'])
+            last_rec = recs_sorted[-1]
+            ps = last_rec['pad_start']
+            pe = last_rec['pad_end']
+            # 裁剪
+            if pe < win_s or ps > win_e:
+                continue
+            ps_clipped = max(ps, win_s)
+            pe_clipped = min(pe, win_e)
+            # 计算该 mission 在聚焦窗口期间是否有变化
+            any_changed = any(r['changed'] for r in recs_sorted
+                              if r['t'] >= win_s - 48 and r['t'] <= win_e)
+            # 统计变化次数
+            num_changes = sum(1 for r in recs_sorted if r['changed'])
+            result.append({
+                'mission_id': mid,
+                'pad_start': ps_clipped,
+                'pad_end': pe_clipped,
+                'pad_start_raw': ps,
+                'pad_end_raw': pe,
+                'changed': any_changed,
+                'num_changes': num_changes,
+            })
+        result.sort(key=lambda r: r['pad_start'])
+        return result
+
+    lane_bl = _build_swim_lane_data(changes_bl, win_start, win_end)
+    lane_ours = _build_swim_lane_data(changes_ours, win_start, win_end)
+
+    # ------------------------------------------------------------------
+    # 5. 为 mission 分配统一颜色
+    # ------------------------------------------------------------------
+    all_missions = sorted(set(
+        r['mission_id'] for r in lane_bl + lane_ours
+    ))
+    # 使用 tab20 色版，确保不同 mission 颜色区别明显
+    cmap = plt.cm.get_cmap('tab20', max(len(all_missions), 1))
+    mission_colors = {mid: cmap(i) for i, mid in enumerate(all_missions)}
+
+    # ------------------------------------------------------------------
+    # 6. Rolling 指标
+    # ------------------------------------------------------------------
+    def _rolling_metrics(snapshots: List[dict]) -> dict:
+        roll_indices = list(range(len(snapshots)))
+        drifts = [s['metrics'].get('plan_drift', 0.0) for s in snapshots]
+        ts = [s['t'] for s in snapshots]
+        return {'roll_indices': roll_indices, 'drifts': drifts, 'ts': ts}
+
+    def _rolling_change_counts(change_records: List[dict],
+                               n_rolls: int) -> List[int]:
+        counts = [0] * n_rolls
+        for rec in change_records:
+            if rec['changed']:
+                ridx = rec['roll_idx']
+                if 0 <= ridx < n_rolls:
+                    counts[ridx] += 1
+        return counts
+
+    metrics_bl = _rolling_metrics(snaps_bl)
+    metrics_ours = _rolling_metrics(snaps_ours)
+    change_counts_bl = _rolling_change_counts(changes_bl, len(snaps_bl))
+    change_counts_ours = _rolling_change_counts(changes_ours, len(snaps_ours))
+
+    # ------------------------------------------------------------------
+    # 7. 绘图
+    # ------------------------------------------------------------------
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(14, 5.5),
+        gridspec_kw={'height_ratios': [1, 1.2], 'hspace': 0.35}
+    )
+
+    # ==================== 上半图：Pad 双泳道 ====================
+    swim_labels = [f"Ours ({policy_ours})", f"Baseline ({policy_baseline})"]
+    y_positions = {'baseline': 1, 'ours': 0}
+
+    def _draw_lane(ax, lane_data, y_pos, mission_colors_map):
+        for rec in lane_data:
+            mid = rec['mission_id']
+            color = mission_colors_map.get(mid, '#888888')
+            width = rec['pad_end'] - rec['pad_start']
+            if width <= 0:
+                width = 1  # 至少可见
+            lw = 1.8 if rec['changed'] else 0.3
+            ec = 'black' if rec['changed'] else (0.5, 0.5, 0.5, 0.3)
+            ax.barh(
+                y_pos, width, left=rec['pad_start'],
+                height=0.6, color=color, alpha=0.85,
+                edgecolor=ec, linewidth=lw,
+                zorder=3 if rec['changed'] else 2
+            )
+
+    _draw_lane(ax_top, lane_bl, y_positions['baseline'], mission_colors)
+    _draw_lane(ax_top, lane_ours, y_positions['ours'], mission_colors)
+
+    ax_top.set_yticks([0, 1])
+    ax_top.set_yticklabels(swim_labels, fontsize=10)
+    ax_top.set_xlim(win_start, win_end)
+    ax_top.set_xlabel(f"Slot (1 slot = {slot_minutes} min)", fontsize=9)
+    ax_top.set_title("Pad Occupation Comparison (black outline = changed)", fontsize=11)
+    ax_top.grid(True, axis='x', alpha=0.2, zorder=0)
+    ax_top.set_axisbelow(True)
+
+    # 标注扰动线
+    for ds in disturbance_slots:
+        if win_start <= ds <= win_end:
+            ax_top.axvline(ds, color='red', linestyle='--', linewidth=1.0,
+                           alpha=0.7, zorder=5)
+            ax_top.text(ds, 1.35, 'D', fontsize=7, color='red',
+                        ha='center', va='bottom', fontweight='bold')
+
+    # 统计标注（右上角）
+    n_changed_bl = sum(1 for r in lane_bl if r['changed'])
+    n_changed_ours = sum(1 for r in lane_ours if r['changed'])
+    n_total_bl = len(lane_bl)
+    n_total_ours = len(lane_ours)
+    stats_text = (f"Changed missions — "
+                  f"Baseline: {n_changed_bl}/{n_total_bl}  |  "
+                  f"Ours: {n_changed_ours}/{n_total_ours}")
+    ax_top.text(0.99, 0.97, stats_text, transform=ax_top.transAxes,
+                fontsize=7.5, ha='right', va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=0.6))
+
+    # ==================== 下半图：Rolling drift + changes ====================
+    max_rolls = max(len(metrics_bl['roll_indices']), len(metrics_ours['roll_indices']))
+    x_bl = metrics_bl['roll_indices']
+    x_ours = metrics_ours['roll_indices']
+
+    # Drift（左 y 轴）
+    color_bl = '#d62728'
+    color_ours = '#1f77b4'
+    ax_bot.plot(x_bl, metrics_bl['drifts'], '-o', color=color_bl,
+                markersize=2.5, linewidth=1.2, label=f"Drift ({policy_baseline})",
+                zorder=3)
+    ax_bot.plot(x_ours, metrics_ours['drifts'], '-s', color=color_ours,
+                markersize=2.5, linewidth=1.2, label=f"Drift ({policy_ours})",
+                zorder=3)
+    ax_bot.set_xlabel("Rolling Step Index", fontsize=10)
+    ax_bot.set_ylabel("Plan Drift", fontsize=10, color='black')
+    ax_bot.tick_params(axis='y', labelcolor='black')
+    ax_bot.set_xlim(-0.5, max_rolls - 0.5)
+    ax_bot.grid(True, axis='both', alpha=0.2, zorder=0)
+    ax_bot.set_axisbelow(True)
+
+    # Changes（右 y 轴）
+    ax_r = ax_bot.twinx()
+    bar_width = 0.35
+    x_bl_bar = np.array(x_bl, dtype=float) - bar_width / 2
+    x_ours_bar = np.array(x_ours, dtype=float) + bar_width / 2
+    ax_r.bar(x_bl_bar, change_counts_bl, width=bar_width,
+             color=color_bl, alpha=0.25, label=f"#Changes ({policy_baseline})",
+             zorder=1)
+    ax_r.bar(x_ours_bar, change_counts_ours, width=bar_width,
+             color=color_ours, alpha=0.25, label=f"#Changes ({policy_ours})",
+             zorder=1)
+    ax_r.set_ylabel("#PadHold Changes", fontsize=10, color='gray')
+    ax_r.tick_params(axis='y', labelcolor='gray')
+
+    # 扰动竖线（映射到 rolling index）
+    # 将扰动的 slot 映射到最近的 rolling step index
+    ts_bl = metrics_bl['ts']
+    for ds in disturbance_slots:
+        # 找到最近的 rolling index
+        closest_idx = None
+        min_dist = float('inf')
+        for i, t_val in enumerate(ts_bl):
+            d = abs(t_val - ds)
+            if d < min_dist:
+                min_dist = d
+                closest_idx = i
+        if closest_idx is not None:
+            ax_bot.axvline(closest_idx, color='red', linestyle='--',
+                           linewidth=0.8, alpha=0.6, zorder=4)
+
+    # 合并两个 axes 的 legend
+    lines1, labels1 = ax_bot.get_legend_handles_labels()
+    lines2, labels2 = ax_r.get_legend_handles_labels()
+    ax_bot.legend(lines1 + lines2, labels1 + labels2,
+                  loc='upper left', fontsize=7.5, ncol=2,
+                  framealpha=0.7)
+
+    ax_bot.set_title("Rolling Metrics: Drift & PadHold Changes per Step", fontsize=11)
+
+    # ------------------------------------------------------------------
+    # 8. 保存
+    # ------------------------------------------------------------------
+    os.makedirs(os.path.dirname(outpath) if os.path.dirname(outpath) else '.', exist_ok=True)
+    fig.savefig(outpath, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    print(f"[OK] Episode case study figure saved: {outpath}")
+    print(f"     Focus window: slot [{win_start}, {win_end}] "
+          f"(center={focus_center_slot})")
+    print(f"     Baseline rolling steps: {len(snaps_bl)}, "
+          f"Ours rolling steps: {len(snaps_ours)}")
+    print(f"     Disturbance slots: {disturbance_slots}")
 
 
 # ============================================================================
@@ -2218,7 +2948,7 @@ def main():
         help="include LLM-related outputs (default: off)"
     )
     parser.add_argument(
-        "--policies", type=str, default="fixed_default,fixed_tuned,nofreeze",
+        "--policies", type=str, default="fixed_default,fixed_tuned,full_unlock",
         help="comma-separated policy filter for baseline tables"
     )
     parser.add_argument(
@@ -2251,17 +2981,69 @@ def main():
         help="policy A for episode compare plot"
     )
     parser.add_argument(
-        "--episode-policy-b", type=str, default="nofreeze",
+        "--episode-policy-b", type=str, default="full_unlock",
         help="policy B for episode compare plot"
     )
     parser.add_argument(
         "--show", action="store_true",
         help="显示图表窗口"
     )
+    # Episode Case Study Figure 参数
+    parser.add_argument(
+        "--episode-case-seed", type=int, default=None,
+        help="seed for episode case study figure (if set, generates the figure)"
+    )
+    parser.add_argument(
+        "--episode-case-baseline", type=str, default="fixed_tuned",
+        help="baseline policy for case study figure"
+    )
+    parser.add_argument(
+        "--episode-case-ours", type=str, default="full_unlock",
+        help="'ours' policy for case study figure"
+    )
+    parser.add_argument(
+        "--episode-case-focus", type=int, default=None,
+        help="focus_center_slot for case study figure (auto if omitted)"
+    )
+    parser.add_argument(
+        "--episode-case-pre", type=int, default=48,
+        help="focus window pre-slots (default: 48 = 12h)"
+    )
+    parser.add_argument(
+        "--episode-case-post", type=int, default=192,
+        help="focus window post-slots (default: 192 = 48h)"
+    )
+    parser.add_argument(
+        "--episode-case-level", type=str, default="heavy",
+        help="disturbance level for case study directory matching (default: heavy)"
+    )
     
     args = parser.parse_args()
 
     policies = [p.strip() for p in (args.policies or "").split(",") if p.strip()]
+
+    # Episode Case Study Figure（独立于 run_analysis，如果指定了 seed 则生成）
+    if args.episode_case_seed is not None:
+        case_outpath = os.path.join(
+            args.output,
+            f"episode_case_study_seed{args.episode_case_seed}"
+            f"_{args.episode_case_baseline}_vs_{args.episode_case_ours}.png"
+        )
+        # results_dir 尝试 batch_10day 子目录 或 直接用 input
+        batch_dir = os.path.join(args.input, "batch_10day")
+        if not os.path.isdir(batch_dir):
+            batch_dir = args.input
+        plot_episode_case_study(
+            results_dir=batch_dir,
+            seed=args.episode_case_seed,
+            policy_baseline=args.episode_case_baseline,
+            policy_ours=args.episode_case_ours,
+            outpath=case_outpath,
+            focus_center_slot=args.episode_case_focus,
+            pre=args.episode_case_pre,
+            post=args.episode_case_post,
+            disturbance_level=args.episode_case_level,
+        )
     
     run_analysis(
         input_dir=args.input,

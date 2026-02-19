@@ -3,7 +3,7 @@
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple, Any
 
 # 避免循环导入，使用字符串类型提示
@@ -24,7 +24,15 @@ class MetaParams:
     epsilon_solver: Optional[float] = None    # Stage 2延迟容差
     kappa_win: Optional[float] = None         # 窗口切换等效slot
     kappa_seq: Optional[float] = None         # 序列切换等效slot
-    
+
+    # ========== TRCG Repair 扩展字段（默认值，向后兼容） ==========
+    unlock_mission_ids: Optional[Tuple[str, ...]] = None   # 解锁集（传给 solver）
+    root_cause_mission_id: Optional[str] = None            # 根因 mission
+    secondary_root_cause_mission_id: Optional[str] = None  # 次根因 mission
+    decision_source: str = "default"                       # llm|heuristic_fallback|forced_global|default
+    fallback_reason: Optional[str] = None                  # 回退原因
+    attempt_idx: int = 0                                   # 回退链当前尝试序号
+
     def to_weights(self) -> Tuple[float, float, float]:
         """返回权重元组"""
         return (self.w_delay, self.w_shift, self.w_switch)

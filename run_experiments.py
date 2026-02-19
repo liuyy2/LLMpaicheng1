@@ -1,24 +1,27 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-批量实验脚本 - 训练集调参 + 测试集评估 + LLM 策略支持
+批量实验脚本 - 训练集调参 + 测试集评估 + TRCG 修复策略支持
 
 功能：
 1. 生成指定数量的 episodes（轻/中/重扰动各占 1/3）
 2. baseline 调参：在训练集上网格搜索最优参数
 3. 测试集评估：配对比较所有策略
-4. 支持 Real LLM 策略（Qwen3-32B）
+4. 支持 TRCGRepairPolicy（纯启发式 / LLM 辅助）
 5. 输出 CSV 结果文件和 JSONL 日志
 
 用法：
     # Baseline 策略（可并行）
     python run_experiments.py --train-seeds 60 --test-seeds 60 --output results/ --workers 8
     
-    # LLM 策略（强制单线程）
-    python run_experiments.py --mode test-only --policy llm_real --test-seeds 60 \\
+    # TRCG 修复策略（纯启发式，可并行）
+    python run_experiments.py --mode test-only --policy trcg_repair --test-seeds 60 --output results/
+    
+    # TRCG + LLM 策略（强制单线程）
+    python run_experiments.py --mode test-only --policy trcg_repair_llm --test-seeds 60 \\
         --llm-base-url https://api-inference.modelscope.cn/v1 \\
         --llm-model Qwen/Qwen3-32B --llm-key-env DASHSCOPE_API_KEY \\
-        --output results_llm/
+        --output results/
 """
 
 import argparse
@@ -33,23 +36,23 @@ from typing import Dict, List, Any, Tuple, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
-from config import Config, DEFAULT_CONFIG
+from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY, DIFFICULTY_DISTURBANCE
 from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
     FixedWeightPolicy, MockLLMPolicy,
+    TRCGRepairPolicy, create_trcg_repair_policy,
+    GARepairPolicy, create_ga_repair_policy,
+    GreedyPolicy,
     create_policy, MetaParams
 )
 
-# 可选导入 RealLLMPolicy（需要 llm_client）
+# 可选导入 LLMConfig（TRCGRepairPolicy LLM 模式需要）
 try:
-    from policies import RealLLMPolicy, create_real_llm_policy
     from llm_client import LLMConfig
-    HAS_REAL_LLM = True
+    HAS_LLM_CLIENT = True
 except ImportError:
-    HAS_REAL_LLM = False
-    RealLLMPolicy = None
-    create_real_llm_policy = None
+    HAS_LLM_CLIENT = False
     LLMConfig = None
 
 
@@ -101,11 +104,12 @@ class ExperimentConfig:
     
     # 并行处理
     max_workers: int = 1  # 并行进程数（1为串行，设置>1启用并行）
+    llm_max_workers: int = 8  # LLM 策略并行 episode 数（方案 B，受 API rate limit 约束）
 
     # ========== ε-constraint（稳定性约束） ==========
     epsilon_metric: str = "avg_delay"  # 目前仅支持 avg_delay
     epsilon_relative: str = "baseline"  # "baseline" | "absolute"
-    epsilon_value: float = 0.10  # baseline: 相对阈值(10%); absolute: 绝对阈值
+    epsilon_value: float = 0.05  # baseline: 相对阈值(5%); absolute: 绝对阈值
     
     # 输出目录
     output_dir: str = "results"
@@ -116,10 +120,11 @@ class ExperimentConfig:
     llm_key_env: str = "DASHSCOPE_API_KEY"
     llm_cache_dir: Optional[str] = None  # None = output_dir/llm_cache
     llm_log_path: Optional[str] = None   # None = output_dir/llm_logs
-    llm_timeout_s: float = 30.0
-    llm_max_retries: int = 5
+    llm_timeout_s: float = 120.0
+    llm_max_retries: int = 3
     llm_temperature: float = 0.0
     llm_top_p: float = 1.0
+    llm_max_tokens: int = 4096                 # deepseek-reasoner 需要足够空间容纳思维链
 
 
 BASELINE_FIXED_DEFAULT = {
@@ -130,27 +135,8 @@ BASELINE_FIXED_DEFAULT = {
     "kappa_seq": 6.0
 }
 
-# 扰动强度对应的 Config 参数
-DISTURBANCE_CONFIGS = {
-    "light": {
-        "p_weather": 0.05,
-        "p_pad_outage": 0.02,
-        "sigma_duration": 0.12,
-        "sigma_release": 2.0
-    },
-    "medium": {
-        "p_weather": 0.07,
-        "p_pad_outage": 0.03,
-        "sigma_duration": 0.2,
-        "sigma_release": 3.0
-    },
-    "heavy": {
-        "p_weather": 0.10,
-        "p_pad_outage": 0.05,
-        "sigma_duration": 0.3,
-        "sigma_release": 4.0
-    }
-}
+# 扰动强度对应的 Config 参数 —— 此处保留用于旧入口兼容，新代码优先用 make_config_for_difficulty()
+DISTURBANCE_CONFIGS = DIFFICULTY_DISTURBANCE
 
 
 # ============================================================================
@@ -196,6 +182,11 @@ class EpisodeMetricsRecord:
     avg_frozen: float
     avg_num_tasks_scheduled: float
     util_r_pad: float
+
+    # ========== 归一化 drift ==========
+    drift_per_replan: float = 0.0
+    drift_per_day: float = 0.0
+    drift_per_active_mission: float = 0.0
     
     # ========== LLM 相关指标（新增） ==========
     llm_calls: int = 0                    # LLM 调用次数
@@ -258,7 +249,7 @@ class RollingLogEntry:
     solve_status: str
     solve_time_ms: int
     
-    # LLM 相关（仅 llm_real 策略有值）
+    # LLM 相关（仅 trcg_repair_llm 策略有值）
     llm_cache_hit: Optional[bool] = None
     llm_latency_ms: Optional[int] = None
     llm_tokens: Optional[int] = None
@@ -273,17 +264,13 @@ class RollingLogEntry:
 # 场景生成
 # ============================================================================
 
-def create_config_for_disturbance(level: str, solver_timeout: float = 20.0) -> Config:
-    """根据扰动强度创建配置"""
-    params = DISTURBANCE_CONFIGS.get(level, DISTURBANCE_CONFIGS["medium"])
-    
-    return Config(
-        schema_version=DEFAULT_CONFIG.schema_version,
-        p_weather=params["p_weather"],
-        p_pad_outage=params["p_pad_outage"],
-        sigma_duration=params["sigma_duration"],
-        sigma_release=params["sigma_release"],
-        solver_timeout_s=solver_timeout
+def create_config_for_disturbance(level: str, solver_timeout: float = 20.0,
+                                   num_missions_override: int = None) -> Config:
+    """根据扰动强度创建配置（已经自动固定任务数）"""
+    return make_config_for_difficulty(
+        difficulty=level,
+        num_missions_override=num_missions_override,
+        solver_timeout_s=solver_timeout,
     )
 
 
@@ -341,7 +328,8 @@ def run_single_episode(
     dataset: str,
     solver_timeout: float = 20.0,
     exp_config: Optional[ExperimentConfig] = None,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    num_missions_override: Optional[int] = None,
 ) -> EpisodeMetricsRecord:
     """
     运行单个 episode
@@ -355,14 +343,16 @@ def run_single_episode(
         solver_timeout: 求解超时
         exp_config: 实验配置（用于 LLM 参数）
         output_dir: 日志输出目录
+        num_missions_override: 手动覆盖任务数（None 则按 difficulty 固定）
     
     Returns:
         EpisodeMetricsRecord
     """
     wall_start_time = time.time()
     
-    # 创建配置
-    config = create_config_for_disturbance(disturbance_level, solver_timeout)
+    # 创建配置（已自动按 difficulty 固定任务数）
+    config = create_config_for_disturbance(disturbance_level, solver_timeout,
+                                           num_missions_override=num_missions_override)
     
     # 生成场景
     scenario = generate_scenario(seed=seed, config=config)
@@ -375,7 +365,7 @@ def run_single_episode(
     llm_stats = None  # 用于记录 LLM 统计
     
     if policy_name == "fixed_default":
-        # Delay-Only baseline: Stage 1 only, no future freeze
+        # Single-Stage baseline: Stage 1 only, no future freeze
         policy = FixedWeightPolicy(
             w_delay=1.0,
             w_shift=0.0,
@@ -388,7 +378,7 @@ def run_single_episode(
             kappa_seq=policy_params.get("kappa_seq")
         )
     elif policy_name in ("fixed", "fixed_tuned"):
-        # Fixed-Balanced baseline: two-stage with fixed (freeze, epsilon)
+        # Two-Stage+Freeze baseline: two-stage with fixed (freeze, epsilon)
         policy = FixedWeightPolicy(
             w_delay=1.0,
             w_shift=0.0,
@@ -400,8 +390,8 @@ def run_single_episode(
             kappa_win=policy_params.get("kappa_win"),
             kappa_seq=policy_params.get("kappa_seq")
         )
-    elif policy_name == "nofreeze":
-        # No-freeze ablation: same epsilon as tuned, freeze=0
+    elif policy_name == "full_unlock":
+        # Full-unlock (Two-stage): represents global optimization stability limit
         policy = FixedWeightPolicy(
             w_delay=1.0,
             w_shift=0.0,
@@ -413,6 +403,9 @@ def run_single_episode(
             kappa_win=policy_params.get("kappa_win"),
             kappa_seq=policy_params.get("kappa_seq")
         )
+    elif policy_name == "greedy":
+        # Greedy (EDF) baseline: no CP-SAT
+        policy = GreedyPolicy(policy_name="greedy")
     elif policy_name == "mockllm":
         log_dir = None
         if output_dir:
@@ -424,13 +417,25 @@ def run_single_episode(
             log_dir=log_dir,
             episode_id=episode_id
         )
-    elif policy_name == "llm_real":
-        if not HAS_REAL_LLM:
+    elif policy_name == "trcg_repair":
+        # TRCG 修复策略（纯启发式模式，无 LLM）
+        log_dir = None
+        if output_dir:
+            log_dir = os.path.join(output_dir, "logs", episode_id)
+            os.makedirs(log_dir, exist_ok=True)
+        policy = TRCGRepairPolicy(
+            policy_name="trcg_repair",
+            log_dir=log_dir,
+            enable_logging=True,
+            episode_id=episode_id
+        )
+    elif policy_name == "trcg_repair_llm":
+        # TRCG 修复策略（LLM 辅助模式）
+        if not HAS_LLM_CLIENT:
             raise ImportError(
-                "llm_real 策略需要 llm_client 模块，请确保 llm_client.py 存在且已安装 openai 库"
+                "trcg_repair_llm 策略需要 llm_client 模块，请确保 llm_client.py 存在且已安装 openai 库"
             )
         
-        # 准备日志和缓存目录
         log_dir = None
         cache_dir = None
         
@@ -443,43 +448,54 @@ def run_single_episode(
             if cache_dir is None:
                 cache_dir = os.path.join(output_dir or ".", "llm_cache")
         
-        # 创建 LLM 配置
         llm_config = LLMConfig(
             api_key_env=exp_config.llm_key_env if exp_config else "DASHSCOPE_API_KEY",
             base_url=exp_config.llm_base_url if exp_config else "https://api-inference.modelscope.cn/v1",
             model=exp_config.llm_model if exp_config else "Qwen/Qwen3-32B",
             temperature=exp_config.llm_temperature if exp_config else 0.0,
             top_p=exp_config.llm_top_p if exp_config else 1.0,
-            timeout_s=exp_config.llm_timeout_s if exp_config else 30.0,
-            max_retries=exp_config.llm_max_retries if exp_config else 5,
+            max_tokens=exp_config.llm_max_tokens if exp_config else 4096,
+            timeout_s=exp_config.llm_timeout_s if exp_config else 120.0,
+            max_retries=exp_config.llm_max_retries if exp_config else 3,
             cache_dir=cache_dir,
             log_file=os.path.join(log_dir, "llm_raw_calls.jsonl") if log_dir else None,
             enable_thinking=False
         )
         
-        fallback_params = None
-        if output_dir:
-            best_params_path = os.path.join(output_dir, "best_params.json")
-            if os.path.exists(best_params_path):
-                try:
-                    with open(best_params_path, "r", encoding="utf-8") as f:
-                        best = json.load(f)
-                    fallback_params = MetaParams(
-                        w_delay=best.get("w_delay", 10.0),
-                        w_shift=best.get("w_shift", 1.0),
-                        w_switch=best.get("w_switch", 5.0),
-                        freeze_horizon=best.get("freeze_horizon", 12)
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to load best_params.json for fallback: {e}")
-
-        policy = RealLLMPolicy(
+        policy = create_trcg_repair_policy(
             llm_config=llm_config,
-            policy_name="llm_real",
+            policy_name="trcg_repair_llm",
+            log_dir=log_dir,
+            episode_id=episode_id
+        )
+    elif policy_name == "ga_repair":
+        # GA Repair 策略（Matheuristic baseline, V2 加速版）
+        log_dir = None
+        if output_dir:
+            log_dir = os.path.join(output_dir, "logs", episode_id)
+            os.makedirs(log_dir, exist_ok=True)
+        policy = GARepairPolicy(
+            policy_name="ga_repair",
+            pop_size=policy_params.get("pop_size", 12),
+            generations=policy_params.get("generations", 5),
+            K=policy_params.get("K", 5),
+            mutation_rate=policy_params.get("mutation_rate", 0.2),
+            candidate_pool_size=policy_params.get("candidate_pool_size", 15),
+            # V2 加速参数
+            n_jobs=policy_params.get("n_jobs", 8),
+            eval_budget=policy_params.get("eval_budget", 48),
+            early_stop_patience=policy_params.get("early_stop_patience", 2),
+            eval_timeout_s=policy_params.get("eval_timeout_s", 0.5),
+            final_timeout_s=policy_params.get("final_timeout_s", None),
+            eval_cp_workers=policy_params.get("eval_cp_workers", 1),
+            final_cp_workers=policy_params.get("final_cp_workers", None),
+            enable_cache=policy_params.get("enable_cache", True),
+            # 兼容旧参数
+            parallel_eval=policy_params.get("parallel_eval", True),
+            num_workers=policy_params.get("num_workers", 4),
             log_dir=log_dir,
             enable_logging=True,
             episode_id=episode_id,
-            fallback_params=fallback_params
         )
     else:
         raise ValueError(f"Unknown policy: {policy_name}")
@@ -503,7 +519,7 @@ def run_single_episode(
     llm_cache_hit_rate = 0.0
     llm_fallback_count = 0
     
-    if policy_name in ("mockllm", "llm_real"):
+    if policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair"):
         if hasattr(policy, 'get_llm_stats'):
             llm_stats = policy.get_llm_stats()
             llm_calls = llm_stats.get("call_count", 0)
@@ -528,7 +544,7 @@ def run_single_episode(
     wall_time_total_ms = int((time.time() - wall_start_time) * 1000)
     
     # 写入 episode 日志（JSONL 格式）
-    if output_dir and policy_name in ("mockllm", "llm_real"):
+    if output_dir and policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair"):
         log_dir = os.path.join(output_dir, "logs", episode_id)
         os.makedirs(log_dir, exist_ok=True)
         
@@ -569,7 +585,10 @@ def run_single_episode(
         avg_frozen=m.avg_frozen,
         avg_num_tasks_scheduled=m.avg_num_tasks_scheduled,
         util_r_pad=m.util_r_pad,
-        # LLM ??
+        drift_per_replan=m.drift_per_replan,
+        drift_per_day=m.drift_per_day,
+        drift_per_active_mission=m.drift_per_active_mission,
+        # LLM
         llm_calls=llm_calls,
         llm_time_total_ms=llm_time_total_ms,
         llm_latency_total_ms=llm_latency_total_ms,
@@ -804,7 +823,7 @@ def grid_search_tuning(
         w_delay, w_drift, w_time, w_forced = [w / w_sum for w in (w_delay, w_drift, w_time, w_forced)]
 
     if verbose:
-        print("\nBaseline (Delay-Only) train stats:")
+        print("\nBaseline (Single-Stage) train stats:")
         print(f"  delay={baseline_fixed['avg_delay']:.3f}, drift={baseline_fixed['avg_drift']:.5f}, time_dev={baseline_fixed['avg_time_deviation_min']:.3f}, forced={baseline_fixed['avg_forced_replan_rate']:.3f}, feasible={baseline_fixed['avg_feasible_rate']:.3f}")
         print("Baseline thresholds:")
         print(f"  delay<= {base_delay * (1 + exp_config.tuning_delay_tolerance):.3f} (tol={exp_config.tuning_delay_tolerance*100:.1f}%)")
@@ -815,8 +834,9 @@ def grid_search_tuning(
     tuning_results: List[TuningResult] = []
     best_params = None
     best_drift = float('inf')
-    best_violation = float('inf')
     best_delay = float('inf')
+    best_violation = float('inf')
+    best_drift_fallback = float('inf')  # fallback 用的 drift
     feasible_found = False
 
     total_combos = len(param_grid)
@@ -853,7 +873,7 @@ def grid_search_tuning(
             exp_config.tuning_weight_feasible * feasible_penalty  # 新增可行性惩罚
         )
         
-        # 记录是否满足基本要求（用于分析，不影响选择）
+        # 硬约束判定：feasible_ok + epsilon_ok 均需满足才视为可行候选
         delay_ok = stats["avg_delay"] <= base_delay * (1 + exp_config.tuning_delay_tolerance)
         feasible_ok = stats["avg_feasible_rate"] >= base_feasible - 1e-9
 
@@ -890,10 +910,13 @@ def grid_search_tuning(
             print(
                 f"  delay={stats['avg_delay']:.3f}, drift={stats['avg_drift']:.5f}, "
                 f"time_dev={stats['avg_time_deviation_min']:.3f}, forced={stats['avg_forced_replan_rate']:.3f}, "
-                f"feasible={stats['avg_feasible_rate']:.3f}, combined={combined:.4f}, eps_ok={epsilon_ok}"
+                f"feasible={stats['avg_feasible_rate']:.3f}, combined={combined:.4f}, "
+                f"eps_ok={epsilon_ok}, feas_ok={feasible_ok}"
             )
 
-        if epsilon_ok:
+        # 选参逻辑：必须同时满足 epsilon_ok + feasible_ok，用 avg_drift 选优
+        candidate_feasible = epsilon_ok and feasible_ok
+        if candidate_feasible:
             feasible_found = True
             if (stats["avg_drift"] < best_drift) or (
                 stats["avg_drift"] == best_drift and stats["avg_delay"] < best_delay
@@ -913,12 +936,12 @@ def grid_search_tuning(
                     "baseline_avg_delay": base_delay
                 }
         elif not feasible_found:
+            # 回退：无可行候选时，优先选 epsilon_violation 最小的，同违约用 avg_drift 选优
             if (epsilon_violation < best_violation) or (
-                epsilon_violation == best_violation and stats["avg_drift"] < best_drift
+                epsilon_violation == best_violation and stats["avg_drift"] < best_drift_fallback
             ):
                 best_violation = epsilon_violation
-                best_drift = stats["avg_drift"]
-                best_delay = stats["avg_delay"]
+                best_drift_fallback = stats["avg_drift"]
                 best_params = {
                     "freeze_horizon": freeze_h,
                     "use_two_stage": True,
@@ -937,7 +960,7 @@ def grid_search_tuning(
         if feasible_found:
             print(f"Best drift (feasible): {best_drift:.5f}")
         else:
-            print(f"WARNING: no feasible params, best violation={best_violation:.3f}, drift={best_drift:.5f}")
+            print(f"WARNING: no feasible params (eps+feas), best violation={best_violation:.3f}, drift={best_drift_fallback:.5f}")
         
         # 边界检查警告
         slot_minutes = DEFAULT_CONFIG.slot_minutes
@@ -970,7 +993,8 @@ def run_evaluation(
     """
     在指定数据集上评估多个策略（使用并行处理）
     
-    注意：llm_real 策略会自动降级为单线程执行
+    非 LLM 策略使用 max_workers 进程并行;
+    trcg_repair_llm 使用 llm_max_workers 线程并行 (方案B)。
     
     Args:
         assignments: [(seed, level), ...]
@@ -988,7 +1012,16 @@ def run_evaluation(
     if verbose:
         print(f"\n{'='*70}")
         print(f" 评估 {dataset} 集: {len(assignments)} episodes × {len(policies)} policies")
-        print(f" 并行进程数: {max_workers}")
+        # 根据策略类型显示对应的并行度
+        has_llm = any(p == "trcg_repair_llm" for p in policies)
+        has_non_llm = any(p != "trcg_repair_llm" for p in policies)
+        llm_w = getattr(exp_config, 'llm_max_workers', 4) if exp_config else 4
+        if has_non_llm and has_llm:
+            print(f" 非LLM策略并行进程数: {max_workers} | LLM策略并发episode数: {llm_w}")
+        elif has_llm:
+            print(f" LLM策略并发 episode 数: {llm_w}")
+        else:
+            print(f" 并行进程数: {max_workers}")
         print(f"{'='*70}")
     
     all_records: List[EpisodeMetricsRecord] = []
@@ -998,7 +1031,7 @@ def run_evaluation(
     non_llm_policies = {}
     
     for policy_name, policy_params in policies.items():
-        if policy_name == "llm_real":
+        if policy_name == "trcg_repair_llm":
             llm_policies[policy_name] = policy_params
         else:
             non_llm_policies[policy_name] = policy_params
@@ -1058,39 +1091,64 @@ def run_evaluation(
         if verbose:
             print(f"  完成: {total}/{total}")
     
-    # 2. 串行执行 LLM 策略
+    # 2. 并行执行 LLM 策略（方案 B：受控并发）
     if llm_policies:
+        # 从 exp_config 获取 LLM 专用并发数
+        llm_workers = getattr(exp_config, 'llm_max_workers', 4) if exp_config else 4
+        # 确保至少为 1
+        llm_workers = max(1, llm_workers)
+        
         if verbose:
-            print(f"\n[2/2] 评估 LLM 策略（强制串行）: {list(llm_policies.keys())}")
-            print(f"  原因: LLM API 调用需要顺序执行以保证缓存一致性和避免速率限制")
+            print(f"\n[2/2] 评估 LLM 策略: {list(llm_policies.keys())}")
+            print(f"  并发 episode 数: {llm_workers}")
+            print(f"  磁盘缓存已启用，重复运行可命中缓存")
         
         for policy_name, policy_params in llm_policies.items():
-            completed = 0
-            total = len(assignments)
+            tasks = [
+                (seed, level, policy_name, policy_params, dataset,
+                 solver_timeout, exp_config, output_dir)
+                for seed, level in assignments
+            ]
+            total = len(tasks)
             
-            for seed, level in assignments:
-                try:
-                    record = run_single_episode(
-                        seed=seed,
-                        disturbance_level=level,
-                        policy_name=policy_name,
-                        policy_params=policy_params,
-                        dataset=dataset,
-                        solver_timeout=solver_timeout,
-                        exp_config=exp_config,
-                        output_dir=output_dir
-                    )
-                    all_records.append(record)
-                except Exception as e:
-                    logger.error(f"LLM Error: seed={seed}, policy={policy_name}: {e}")
-                    # LLM 策略失败不中断实验，记录失败
-                    all_records.append(_create_failed_record(
-                        seed, level, policy_name, dataset
-                    ))
-                
-                completed += 1
-                if verbose and completed % 10 == 0:
-                    print(f"  进度: {completed}/{total}")
+            if llm_workers <= 1:
+                # 串行执行
+                completed = 0
+                for task in tasks:
+                    seed, level = task[0], task[1]
+                    try:
+                        record = run_single_episode_wrapper(task)
+                        all_records.append(record)
+                    except Exception as e:
+                        logger.error(f"LLM Error: seed={seed}, policy={policy_name}: {e}")
+                        all_records.append(_create_failed_record(
+                            seed, level, policy_name, dataset
+                        ))
+                    completed += 1
+                    if verbose and completed % 10 == 0:
+                        print(f"  进度: {completed}/{total}")
+            else:
+                # 并行执行（方案 B）
+                with ThreadPoolExecutor(max_workers=llm_workers) as executor:
+                    futures = {
+                        executor.submit(run_single_episode_wrapper, task): task
+                        for task in tasks
+                    }
+                    completed = 0
+                    for future in as_completed(futures):
+                        task = futures[future]
+                        seed, level = task[0], task[1]
+                        try:
+                            record = future.result()
+                            all_records.append(record)
+                        except Exception as e:
+                            logger.error(f"LLM Error: seed={seed}, policy={policy_name}: {e}")
+                            all_records.append(_create_failed_record(
+                                seed, level, policy_name, dataset
+                            ))
+                        completed += 1
+                        if verbose and completed % 10 == 0:
+                            print(f"  进度: {completed}/{total}")
             
             if verbose:
                 print(f"  完成: {total}/{total}")
@@ -1148,6 +1206,7 @@ def save_episode_results(records: List[EpisodeMetricsRecord], filepath: str):
         "avg_time_deviation_min", "total_resource_switches", "makespan_cmax",
         "feasible_rate", "forced_replan_rate", "avg_frozen", "avg_num_tasks_scheduled",
         "num_replans", "num_forced_replans", "avg_solve_time_ms", "total_runtime_s",
+        "drift_per_replan", "drift_per_day", "drift_per_active_mission",
         # LLM ????
         "llm_calls", "llm_time_total_ms", "llm_latency_total_ms",
         "llm_prompt_tokens", "llm_completion_tokens", "llm_total_tokens",
@@ -1406,7 +1465,7 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     save_best_params(best_params, best_params_path)
     
     # 3. 定义所有策略
-    nofreeze_params = {
+    full_unlock_params = {
         "freeze_horizon": 0,
         "use_two_stage": True,
         "epsilon_solver": best_params.get("epsilon_solver"),
@@ -1416,7 +1475,7 @@ def run_full_experiment(exp_config: ExperimentConfig, verbose: bool = True):
     policies = {
         "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": nofreeze_params
+        "full_unlock": full_unlock_params
     }
     
     # 4. 在测试集上评估
@@ -1511,7 +1570,7 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
     save_best_params(best_params, best_params_path)
     
     # 定义所有策略（使用最优参数）
-    nofreeze_params = {
+    full_unlock_params = {
         "freeze_horizon": 0,
         "use_two_stage": True,
         "epsilon_solver": best_params.get("epsilon_solver"),
@@ -1521,7 +1580,7 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
     policies = {
         "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": nofreeze_params
+        "full_unlock": full_unlock_params
     }
     
     # 在训练集上评估所有策略（完整记录）
@@ -1564,7 +1623,7 @@ def run_train_only(exp_config: ExperimentConfig, verbose: bool = True):
 
 def run_test_only(
     exp_config: ExperimentConfig,
-    params_path: str,
+    params_path: Optional[str],
     selected_policies: List[str],
     verbose: bool = True
 ):
@@ -1573,7 +1632,7 @@ def run_test_only(
     
     Args:
         exp_config: 实验配置
-        params_path: 最优参数文件路径
+        params_path: 最优参数文件路径（可为 None，非 baseline 策略不需要）
         selected_policies: 要评估的策略列表
         verbose: 是否打印详细信息
     
@@ -1595,15 +1654,16 @@ def run_test_only(
     print("Note: for fair comparison, keep the same test seed count/assignment as fixed_tuned, or include fixed_tuned in the same run.")
     print(f"输出目录: {exp_config.output_dir}")
     
-    # 加载最优参数
-    if not os.path.exists(params_path):
-        print(f"错误: 参数文件不存在: {params_path}")
-        return
-    
-    with open(params_path, 'r', encoding='utf-8') as f:
-        best_params = json.load(f)
-    
-    print(f"\n加载的最优参数: {best_params}")
+    # 加载最优参数（仅 fixed_tuned/full_unlock 需要）
+    best_params = {}
+    if params_path and os.path.exists(params_path):
+        with open(params_path, 'r', encoding='utf-8') as f:
+            best_params = json.load(f)
+        print(f"\n加载的最优参数: {best_params}")
+    elif params_path:
+        print(f"警告: 参数文件不存在: {params_path}，使用默认参数")
+    else:
+        print(f"提示: 未指定参数文件，使用默认参数")
     
     # 生成测试集种子（从训练集之后开始）
     train_assignments, test_assignments = generate_seed_assignments(
@@ -1618,7 +1678,7 @@ def run_test_only(
     save_seed_manifest(train_assignments, test_assignments, seed_manifest_path)
 
 
-    nofreeze_params = {
+    full_unlock_params = {
         "freeze_horizon": 0,
         "use_two_stage": True,
         "epsilon_solver": best_params.get("epsilon_solver"),
@@ -1629,9 +1689,12 @@ def run_test_only(
     all_policies = {
         "fixed_tuned": best_params,
         "fixed_default": BASELINE_FIXED_DEFAULT,
-        "nofreeze": nofreeze_params,
+        "full_unlock": full_unlock_params,
+        "greedy": {},
         "mockllm": {},
-        "llm_real": {}  # LLM params from exp_config
+        "trcg_repair": {},
+        "trcg_repair_llm": {},  # LLM params from exp_config
+        "ga_repair": {}  # GA Repair (Matheuristic baseline)
     }
     
     # 过滤选定的策略
@@ -1641,18 +1704,16 @@ def run_test_only(
         if name in selected_policies
     }
     
-    # 检查 llm_real 是否可用
-    if "llm_real" in policies and not HAS_REAL_LLM:
-        print("警告: llm_real 策略不可用（缺少 llm_client 模块），已跳过")
-        del policies["llm_real"]
+    # 检查 trcg_repair_llm 是否可用
+    if "trcg_repair_llm" in policies and not HAS_LLM_CLIENT:
+        print("警告: trcg_repair_llm 策略不可用（缺少 llm_client 模块），已跳过")
+        del policies["trcg_repair_llm"]
     
-    # 检查 llm_real 的并行设置
-    if "llm_real" in policies and exp_config.max_workers > 1:
-        logger.warning(
-            f"检测到 llm_real 策略，强制将 workers 从 {exp_config.max_workers} 降为 1。"
-            f"原因: LLM API 调用需要顺序执行以保证缓存一致性和避免速率限制。"
+    # 检查 trcg_repair_llm 的并行设置：不再强制降级，由 llm_max_workers 控制 LLM 并发
+    if "trcg_repair_llm" in policies:
+        logger.info(
+            f"trcg_repair_llm 策略将使用 llm_max_workers={exp_config.llm_max_workers} 并发执行"
         )
-        exp_config.max_workers = 1
     
     print(f"实际评估策略: {list(policies.keys())}")
     
@@ -1751,7 +1812,10 @@ def _load_existing_records(filepath: str) -> List[EpisodeMetricsRecord]:
                 llm_cache_hit_rate=float(row.get('llm_cache_hit_rate', 0.0)),
                 llm_fallback_count=int(row.get('llm_fallback_count', 0)),
                 solver_time_total_ms=int(row.get('solver_time_total_ms', 0)),
-                wall_time_total_ms=int(row.get('wall_time_total_ms', 0))
+                wall_time_total_ms=int(row.get('wall_time_total_ms', 0)),
+                drift_per_replan=float(row.get('drift_per_replan', 0.0)),
+                drift_per_day=float(row.get('drift_per_day', 0.0)),
+                drift_per_active_mission=float(row.get('drift_per_active_mission', 0.0)),
             )
             records.append(record)
 
@@ -1772,14 +1836,17 @@ def main():
   # 跑 baseline 策略（可并行）
   python run_experiments.py --train-seeds 60 --test-seeds 60 --output results/ --workers 8
 
-  # 仅跑 llm_real 策略（强制单线程）
-  python run_experiments.py --mode test-only --policy llm_real --test-seeds 60 \\
+  # 跑 TRCG 修复策略（纯启发式，可并行）
+  python run_experiments.py --mode test-only --policy trcg_repair --test-seeds 60 --output results/
+
+  # 跑 TRCG + LLM 策略（强制单线程）
+  python run_experiments.py --mode test-only --policy trcg_repair_llm --test-seeds 60 \\
       --llm-base-url https://api-inference.modelscope.cn/v1 \\
       --llm-model Qwen/Qwen3-32B --llm-key-env DASHSCOPE_API_KEY \\
-      --output results_llm/
+      --output results/
 
-  # 跑所有策略包括 llm_real
-  python run_experiments.py --mode test-only --policy fixed_tuned,nofreeze,llm_real \\
+  # 跑所有策略包括 TRCG
+  python run_experiments.py --mode test-only --policy fixed_tuned,full_unlock,trcg_repair \\
       --test-seeds 30 --output results/
 """
     )
@@ -1845,7 +1912,19 @@ def main():
     parser.add_argument(
         "--policy", type=str, default=None,
         help="要评估的策略，逗号分隔 (default: 全部)。"
-             "可选: fixed_tuned, fixed_default, nofreeze, mockllm, llm_real"
+             "可选: fixed_tuned, fixed_default, full_unlock, greedy, mockllm, trcg_repair, trcg_repair_llm, ga_repair"
+    )
+    
+    # ========== 路A: Difficulty / 固定任务数 ==========
+    parser.add_argument(
+        "--difficulty", type=str, default=None,
+        choices=["light", "medium", "heavy"],
+        help="扰动档位 (light=15missions, medium=20, heavy=25)。"
+             "若指定则只跑该档位; 若省略则三档各跑 1/3"
+    )
+    parser.add_argument(
+        "--num-missions", type=int, default=None,
+        help="手动覆盖任务数 (若指定则忽略 difficulty 默认值)"
     )
     
     # ========== LLM 参数 ==========
@@ -1870,12 +1949,12 @@ def main():
         help="LLM 日志路径 (default: output_dir/llm_logs)"
     )
     parser.add_argument(
-        "--llm-timeout-s", type=float, default=30.0,
-        help="LLM 调用超时秒数 (default: 30.0)"
+        "--llm-timeout-s", type=float, default=120.0,
+        help="LLM 调用超时秒数 (default: 120.0)"
     )
     parser.add_argument(
-        "--llm-max-retries", type=int, default=5,
-        help="LLM 最大重试次数 (default: 5)"
+        "--llm-max-retries", type=int, default=3,
+        help="LLM 最大重试次数 (default: 3)"
     )
     parser.add_argument(
         "--llm-temperature", type=float, default=0.0,
@@ -1894,12 +1973,20 @@ def main():
         args.test_seeds = 9
         print("快速测试模式: train=9, test=9")
     
+    # -- Difficulty 过滤 --
+    if args.difficulty:
+        disturbance_levels = [args.difficulty]
+        logger.info(f"仅跑单档 difficulty={args.difficulty}, "
+                     f"固定任务数={MISSIONS_BY_DIFFICULTY[args.difficulty]}")
+    else:
+        disturbance_levels = ["light", "medium", "heavy"]
+    
     # 解析策略列表
-    all_baseline_policies = ["fixed_tuned", "fixed_default", "nofreeze"]
+    all_baseline_policies = ["fixed_tuned", "fixed_default", "full_unlock"]
     if args.policy:
         selected_policies = [p.strip() for p in args.policy.split(",")]
     else:
-        selected_policies = all_baseline_policies  # 默认不包含 llm_real
+        selected_policies = all_baseline_policies  # 默认不包含 trcg_repair_llm
     
     # 创建配置
     exp_config = ExperimentConfig(
@@ -1912,6 +1999,7 @@ def main():
         epsilon_metric=args.epsilon_metric,
         epsilon_relative=args.epsilon_relative,
         epsilon_value=args.epsilon_value,
+        disturbance_levels=disturbance_levels,
         # LLM 参数
         llm_base_url=args.llm_base_url,
         llm_model=args.llm_model,
@@ -1924,13 +2012,11 @@ def main():
         llm_top_p=args.llm_top_p
     )
     
-    # 检查 llm_real 策略的并行设置
-    if "llm_real" in selected_policies and args.workers > 1:
-        logger.warning(
-            f"检测到 llm_real 策略，强制将 workers 从 {args.workers} 降为 1。"
-            f"原因: LLM API 调用需要顺序执行以保证缓存一致性和避免速率限制。"
-        )
-        exp_config.max_workers = 1
+    # -- num_missions 覆盖 (全局, 需要 monkey-patch 到 wrapper) --
+    _num_missions_override = args.num_missions  # 若为 None 则按 difficulty 默认
+    
+    # trcg_repair_llm 的并行由 llm_max_workers (方案B ThreadPoolExecutor) 控制，
+    # 不再强制降 max_workers。max_workers 仅影响非 LLM 策略。
     
     # 快速模式下减少调参组合
     if args.quick:
@@ -1946,15 +2032,25 @@ def main():
         run_train_only(exp_config, verbose=args.verbose or args.quick)
     
     elif args.mode == "test-only":
+        # 判断选定策略是否需要 best_params.json
+        # 仅 fixed_tuned 和 full_unlock 需要调参结果
+        needs_best_params = any(
+            p in selected_policies for p in ("fixed_tuned", "full_unlock")
+        )
+        
         if not args.load_params:
             # 尝试从输出目录加载
             default_params_path = os.path.join(args.output, "best_params.json")
             if os.path.exists(default_params_path):
                 args.load_params = default_params_path
                 print(f"自动加载参数文件: {args.load_params}")
-            else:
-                print("错误: test-only 模式需要提供 --load-params 或在输出目录中存在 best_params.json")
+            elif needs_best_params:
+                print("错误: test-only 模式下 fixed_tuned/full_unlock 策略需要提供 --load-params 或在输出目录中存在 best_params.json")
                 return
+            else:
+                # 非 baseline 策略无需 best_params，使用 None
+                print(f"提示: 选定策略 {selected_policies} 不需要 best_params.json，直接运行")
+                args.load_params = None
         
         run_test_only(
             exp_config,

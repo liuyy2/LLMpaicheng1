@@ -174,7 +174,7 @@ python run_experiments.py \
 ```bash
 # 步骤 1：运行所有 baseline 策略（可并行）
 python run_experiments.py \
-    --policies fixed greedy nofreeze mockllm \
+    --policies fixed greedy full_unlock mockllm \
     --seeds 1 2 3 4 5 6 7 8 9 10 \
     --disturbance-levels light medium heavy \
     --output-dir results/full_experiment \

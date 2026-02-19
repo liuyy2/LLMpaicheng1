@@ -72,6 +72,32 @@ class Mission:
                 return op
         return None
 
+    def get_launch_op(self) -> Optional[Operation]:
+        """获取发射操作（有 time_windows 的最大 op_index，或最大 op_index）"""
+        ops_with_windows = [op for op in self.operations if op.time_windows]
+        if ops_with_windows:
+            return max(ops_with_windows, key=lambda o: o.op_index)
+        return max(self.operations, key=lambda o: o.op_index) if self.operations else None
+
+    def get_pad_block(self) -> tuple:
+        """获取 (pad_hold, wait, launch) 三元组，兼容 V2.1 和 V2.5"""
+        launch = self.get_launch_op()
+        if not launch:
+            return None, None, None
+        wait = self.get_operation(launch.op_index - 1) if launch.op_index >= 2 else None
+        pad_hold = self.get_operation(launch.op_index - 2) if launch.op_index >= 3 else None
+        return pad_hold, wait, launch
+
+    def get_wait_op(self) -> Optional[Operation]:
+        """获取等待操作（发射前一个操作）"""
+        _, wait, _ = self.get_pad_block()
+        return wait
+
+    def get_pad_hold_op(self) -> Optional[Operation]:
+        """获取 pad 占位操作（发射前两个操作）"""
+        pad_hold, _, _ = self.get_pad_block()
+        return pad_hold
+
 
 @dataclass
 class Resource:
@@ -172,15 +198,20 @@ class SolverResult:
     num_constraints: int = 0
     degradation_count: int = 0                # 降级次数
     degradation_actions: List[str] = field(default_factory=list)
+    anchor_fix_applied_count: int = 0         # LNS 锚点 fix 成功数（mission 数）
+    anchor_fix_skipped_count: int = 0         # LNS 锚点因不可行跳过数（mission 数）
+    anchor_fix_applied_missions: List[str] = field(default_factory=list)  # 被锚定的 mission ID 列表
+    anchor_fix_applied_vars: Dict[str, int] = field(default_factory=dict) # {op_id: fixed_start_slot}
+    anchor_fix_skip_reason: str = ""          # 空="正常施加" / no_prev_plan / unlock_all / all_infeasible
 
 
 @dataclass
 class SolverConfig:
     """求解器配置"""
     # 时间参数
-    slot_minutes: int = 10
-    horizon_slots: int = 144                  # 24h
-    sim_total_slots: int = 432                # 72h
+    slot_minutes: int = 15
+    horizon_slots: int = 96                   # 24h (96*15min)
+    sim_total_slots: int = 960                # 10d (960*15min)
     
     # 冻结参数
     freeze_horizon: int = 12                  # 2h = 12 slots
@@ -813,7 +844,7 @@ def compute_frozen_ops(
 @dataclass
 class SolverConfigV2_1:
     """V2.1 solver config"""
-    horizon_slots: int = 336
+    horizon_slots: int = 960                  # default: 10 days (960*15min)
     w_delay: float = 10.0
     w_shift: float = 1.0
     w_switch: float = 5.0
@@ -827,27 +858,250 @@ class SolverConfigV2_1:
     stage1_time_ratio: float = 0.4
 
 
+# ============================================================================
+# Anchor Fix-and-Optimize (伪 LNS)
+# ============================================================================
+
+def _check_anchor_feasibility(
+    missions: List[Mission],
+    resources: List[Resource],
+    prev_plan: PlanV2_1,
+    unlock_mission_ids: Set[str],
+    frozen_ops: Dict[str, OpAssignment],
+    now: int,
+    horizon: int,
+    op5_max_wait_slots: int,
+) -> Tuple[Dict[str, int], int]:
+    """
+    为非 unlock 的 mission 计算可行的锚点约束。
+
+    对每个不在 unlock_set 中的 mission，尝试将 Op4_start 和 Op6_start
+    固定到 prev_plan 中的时间。在添加约束之前进行可行性检查：
+      1. old_start >= now 且 < horizon
+      2. Op6：old interval 必须落在当前 candidate windows 内
+      3. Op4/Op6：old interval 不得与 resource.unavailable 重叠
+      4. 隐含 Op5 时长 = Op6_start - (Op4_start + Op4_dur) 须在 [0, max_wait]
+    已被 frozen 或 started/completed 的 op 不施加锚点（它们已有约束）。
+
+    Returns
+    -------
+    anchor_fixes : Dict[op_id, fixed_start_slot]
+        可行的锚点约束，key 是 op_id，value 是需要固定的 start slot。
+    skipped_count : int
+        因不可行而跳过的 mission 数。
+    anchored_mission_ids : List[str]
+        成功被锚定的 mission ID 列表。
+    """
+    # 资源不可用区间查找表
+    res_unavail: Dict[str, List[Tuple[int, int]]] = {}
+    for r in resources:
+        res_unavail[r.resource_id] = r.unavailable
+
+    def _interval_overlaps_unavailable(
+        start: int, end: int, res_ids: List[str]
+    ) -> bool:
+        """检查 [start, end) 是否与任一资源的 unavailable 区间重叠。"""
+        for rid in res_ids:
+            for cs, ce in res_unavail.get(rid, []):
+                # 模型中 unavailable 覆盖 [cs, ce] 闭区间 → 区间 [cs, ce+1)
+                # op 区间 [start, end)
+                if start <= ce and cs < end:
+                    return True
+        return False
+
+    def _fits_in_window(
+        start: int, end: int, windows: List[Tuple[int, int]]
+    ) -> bool:
+        """检查 [start, end) 是否完整落在某个 time_window [ws, we] 内。"""
+        for ws, we in windows:
+            if start >= ws and end <= we:
+                return True
+        return False
+
+    anchor_fixes: Dict[str, int] = {}
+    skipped = 0
+    anchored_missions: List[str] = []
+
+    # 收集候选锚定信息（通过单 mission 可行性检查后），用于后续配对检查
+    _candidates: List[dict] = []
+
+    for mission in missions:
+        mid = mission.mission_id
+        if mid in unlock_mission_ids:
+            continue
+
+        pad_hold = mission.get_pad_hold_op()
+        launch = mission.get_launch_op()
+        if not pad_hold or not launch:
+            continue
+
+        # 查询 prev_plan 中的分配
+        prev_pad = prev_plan.get_assignment(pad_hold.op_id)
+        prev_launch = prev_plan.get_assignment(launch.op_id)
+        if not prev_pad or not prev_launch:
+            continue  # prev 中无分配 → 无法锚定
+
+        # 已被 frozen 的 op 跳过（frozen 约束已施加）
+        if pad_hold.op_id in frozen_ops or launch.op_id in frozen_ops:
+            continue
+
+        old_pad_start = prev_pad.start_slot
+        old_launch_start = prev_launch.start_slot
+
+        # 用当前 duration 计算锚定后的 end
+        pad_end = old_pad_start + pad_hold.duration
+        launch_end = old_launch_start + launch.duration
+
+        feasible = True
+
+        # Check 1: old starts 必须在 [now, horizon) 范围内
+        if old_pad_start < now or old_pad_start >= horizon:
+            feasible = False
+        elif old_launch_start < now or old_launch_start >= horizon:
+            feasible = False
+
+        # Check 2: Launch 必须落在当前 candidate windows 内
+        if feasible and launch.time_windows:
+            if not _fits_in_window(old_launch_start, launch_end, launch.time_windows):
+                feasible = False
+
+        # Check 3: intervals 不得与资源 unavailable 重叠
+        if feasible:
+            if _interval_overlaps_unavailable(old_pad_start, pad_end, pad_hold.resources):
+                feasible = False
+        if feasible:
+            if _interval_overlaps_unavailable(old_launch_start, launch_end, launch.resources):
+                feasible = False
+
+        # Check 4: 隐含 wait op 时长可行性
+        if feasible:
+            wait = mission.get_wait_op()
+            if wait:
+                implied_wait_dur = old_launch_start - pad_end  # = Launch_start - PadHold_end
+                min_wait_dur = max(0, wait.duration)
+                max_wait_dur = min_wait_dur + op5_max_wait_slots
+                if implied_wait_dur < min_wait_dur or implied_wait_dur > max_wait_dur:
+                    feasible = False
+
+        if feasible:
+            _candidates.append({
+                'mission_id': mid,
+                'pad_hold_op': pad_hold,
+                'launch_op': launch,
+                'pad_start': old_pad_start,
+                'pad_end': pad_end,
+                'launch_start': old_launch_start,
+                'launch_end': launch_end,
+            })
+        else:
+            skipped += 1
+
+    # Check 5 (新增): 配对资源排他性检查
+    # 确保同一资源上的锚定区间不重叠（否则硬约束会导致 INFEASIBLE）。
+    # 同时检查与已有 frozen_ops 的资源冲突。
+    _frozen_intervals: Dict[str, List[Tuple[int, int]]] = {}  # resource_id -> [(start, end), ...]
+    for fop_id, fop in frozen_ops.items():
+        for rid in fop.resources:
+            _frozen_intervals.setdefault(rid, []).append((fop.start_slot, fop.end_slot))
+
+    _accepted: List[dict] = []
+    # 用于追踪已接受锚定的资源占用
+    _anchor_intervals: Dict[str, List[Tuple[int, int]]] = {}
+
+    def _overlaps_any(start: int, end: int, intervals: List[Tuple[int, int]]) -> bool:
+        for s, e in intervals:
+            if start < e and s < end:
+                return True
+        return False
+
+    for cand in _candidates:
+        conflict = False
+        ph = cand['pad_hold_op']
+        la = cand['launch_op']
+
+        # 检查 pad_hold 资源冲突
+        for rid in ph.resources:
+            existing = _frozen_intervals.get(rid, []) + _anchor_intervals.get(rid, [])
+            if _overlaps_any(cand['pad_start'], cand['pad_end'], existing):
+                conflict = True
+                break
+
+        # 检查 launch 资源冲突
+        if not conflict:
+            for rid in la.resources:
+                existing = _frozen_intervals.get(rid, []) + _anchor_intervals.get(rid, [])
+                if _overlaps_any(cand['launch_start'], cand['launch_end'], existing):
+                    conflict = True
+                    break
+
+        if conflict:
+            skipped += 1
+        else:
+            _accepted.append(cand)
+            # 记录占用区间
+            for rid in ph.resources:
+                _anchor_intervals.setdefault(rid, []).append((cand['pad_start'], cand['pad_end']))
+            for rid in la.resources:
+                _anchor_intervals.setdefault(rid, []).append((cand['launch_start'], cand['launch_end']))
+
+    for cand in _accepted:
+        anchor_fixes[cand['pad_hold_op'].op_id] = cand['pad_start']
+        anchor_fixes[cand['launch_op'].op_id] = cand['launch_start']
+        anchored_missions.append(cand['mission_id'])
+
+    return anchor_fixes, skipped, anchored_missions
+
+
 def solve_v2_1(
     missions: List[Mission],
     resources: List[Resource],
     horizon: int,
     prev_plan: Optional[PlanV2_1] = None,
     frozen_ops: Optional[Dict[str, OpAssignment]] = None,
-    config: Optional[SolverConfigV2_1] = None
+    config: Optional[SolverConfigV2_1] = None,
+    unlock_mission_ids: Optional[Set[str]] = None,
+    now: int = 0,
 ) -> SolverResult:
     if config is None:
         config = SolverConfigV2_1(horizon_slots=horizon)
     if frozen_ops is None:
         frozen_ops = {}
 
+    # ---- 计算锚点约束 (LNS fix-and-optimize) ----
+    anchor_fixes: Dict[str, int] = {}
+    anchor_skipped = 0
+    anchor_missions: List[str] = []
+    anchor_skip_reason = ""
+    if unlock_mission_ids is not None and prev_plan is not None:
+        anchor_fixes, anchor_skipped, anchor_missions = _check_anchor_feasibility(
+            missions, resources, prev_plan, unlock_mission_ids,
+            frozen_ops, now, horizon, config.op5_max_wait_slots,
+        )
+        if not anchor_fixes and anchor_skipped > 0:
+            anchor_skip_reason = "all_infeasible"
+    elif unlock_mission_ids is None:
+        anchor_skip_reason = "unlock_all"
+    elif prev_plan is None:
+        anchor_skip_reason = "no_prev_plan"
+
     start_time = time.time()
     if config.use_two_stage:
         result = _solve_v2_1_two_stage(
-            missions, resources, horizon, prev_plan, frozen_ops, config
+            missions, resources, horizon, prev_plan, frozen_ops, config,
+            anchor_fixes=anchor_fixes,
+            unlock_mission_ids=unlock_mission_ids,
         )
     else:
-        result = _solve_v2_1_with_config(missions, resources, horizon, prev_plan, frozen_ops, config)
+        result = _solve_v2_1_with_config(
+            missions, resources, horizon, prev_plan, frozen_ops, config,
+            anchor_fixes=anchor_fixes,
+        )
     result.solve_time_ms = int((time.time() - start_time) * 1000)
+    result.anchor_fix_applied_count = len(anchor_fixes) // 2  # 每 mission 2 个 op
+    result.anchor_fix_skipped_count = anchor_skipped
+    result.anchor_fix_applied_missions = anchor_missions
+    result.anchor_fix_applied_vars = dict(anchor_fixes)
+    result.anchor_fix_skip_reason = anchor_skip_reason
     return result
 
 
@@ -857,8 +1111,12 @@ def _solve_v2_1_two_stage(
     horizon: int,
     prev_plan: Optional[PlanV2_1],
     frozen_ops: Dict[str, OpAssignment],
-    config: SolverConfigV2_1
+    config: SolverConfigV2_1,
+    anchor_fixes: Optional[Dict[str, int]] = None,
+    unlock_mission_ids: Optional[Set[str]] = None,
 ) -> SolverResult:
+    if anchor_fixes is None:
+        anchor_fixes = {}
     if not missions:
         return SolverResult(
             status=SolveStatus.OPTIMAL,
@@ -882,8 +1140,12 @@ def _solve_v2_1_two_stage(
         stage1_time_ratio=config.stage1_time_ratio
     )
 
+    # Stage 1 不施加锚点约束 —— 让 Stage 1 像 fixed_tuned 一样
+    # 自由寻找最小 delay，确保 delay_bound 不会因锚点而升高。
+    # 锚点仅在 Stage 2 以软惩罚形式生效。
     result_stage1 = _solve_v2_1_with_config(
-        missions, resources, horizon, prev_plan, frozen_ops, stage1_config
+        missions, resources, horizon, prev_plan, frozen_ops, stage1_config,
+        anchor_fixes={},
     )
     if result_stage1.status not in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
         return result_stage1
@@ -891,10 +1153,10 @@ def _solve_v2_1_two_stage(
     total_delay_stage1 = 0.0
     if result_stage1.plan:
         for mission in missions:
-            op6 = mission.get_operation(6)
-            if not op6:
+            launch = mission.get_launch_op()
+            if not launch:
                 continue
-            assign = result_stage1.plan.get_assignment(op6.op_id)
+            assign = result_stage1.plan.get_assignment(launch.op_id)
             if not assign:
                 continue
             delay = max(0, assign.start_slot - mission.due)
@@ -918,7 +1180,9 @@ def _solve_v2_1_two_stage(
     )
 
     result_stage2 = _solve_v2_1_stage2_with_delay_bound(
-        missions, resources, horizon, prev_plan, frozen_ops, stage2_config, delay_bound
+        missions, resources, horizon, prev_plan, frozen_ops, stage2_config, delay_bound,
+        anchor_fixes={},
+        unlock_mission_ids=unlock_mission_ids,
     )
     if result_stage2.status in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
         return result_stage2
@@ -933,7 +1197,9 @@ def _solve_v2_1_stage2_with_delay_bound(
     prev_plan: Optional[PlanV2_1],
     frozen_ops: Dict[str, OpAssignment],
     config: SolverConfigV2_1,
-    delay_bound: float
+    delay_bound: float,
+    anchor_fixes: Optional[Dict[str, int]] = None,
+    unlock_mission_ids: Optional[Set[str]] = None,
 ) -> SolverResult:
     if not missions:
         return SolverResult(
@@ -948,6 +1214,13 @@ def _solve_v2_1_stage2_with_delay_bound(
     for mission in missions:
         all_ops.extend(mission.operations)
 
+    # 构建 wait_op 集合（用语义 helper 而非 hardcoded op_index）
+    wait_op_ids = set()
+    for mission in missions:
+        wait_op = mission.get_wait_op()
+        if wait_op:
+            wait_op_ids.add(wait_op.op_id)
+
     start_vars: Dict[str, cp_model.IntVar] = {}
     end_vars: Dict[str, cp_model.IntVar] = {}
     interval_vars: Dict[str, cp_model.IntervalVar] = {}
@@ -957,7 +1230,7 @@ def _solve_v2_1_stage2_with_delay_bound(
         start_vars[op.op_id] = model.NewIntVar(
             op.release, horizon, f"start_{op.op_id}"
         )
-        if op.op_index == 5:
+        if op.op_id in wait_op_ids:
             min_duration = max(0, op.duration)
             max_duration = min_duration + op5_max_wait_slots
             duration_var = model.NewIntVar(
@@ -990,16 +1263,15 @@ def _solve_v2_1_stage2_with_delay_bound(
             if pred_id in end_vars:
                 model.Add(start_vars[op.op_id] >= end_vars[pred_id])
 
+    # Pad block contiguity: pad_hold -> wait -> launch must be contiguous
     for mission in missions:
-        op4 = mission.get_operation(4)
-        op5 = mission.get_operation(5)
-        op6 = mission.get_operation(6)
-        if not op4 or not op5 or not op6:
+        pad_hold, wait, launch = mission.get_pad_block()
+        if not pad_hold or not wait or not launch:
             continue
-        if op4.op_id in end_vars and op5.op_id in start_vars:
-            model.Add(start_vars[op5.op_id] == end_vars[op4.op_id])
-        if op5.op_id in end_vars and op6.op_id in start_vars:
-            model.Add(start_vars[op6.op_id] == end_vars[op5.op_id])
+        if pad_hold.op_id in end_vars and wait.op_id in start_vars:
+            model.Add(start_vars[wait.op_id] == end_vars[pad_hold.op_id])
+        if wait.op_id in end_vars and launch.op_id in start_vars:
+            model.Add(start_vars[launch.op_id] == end_vars[wait.op_id])
 
     resource_intervals: Dict[str, List[cp_model.IntervalVar]] = {
         r.resource_id: [] for r in resources
@@ -1030,39 +1302,76 @@ def _solve_v2_1_stage2_with_delay_bound(
     window_choice_vars: Dict[str, List[cp_model.BoolVar]] = {}
     prev_window_index: Dict[str, Optional[int]] = {}
     for mission in missions:
-        op6 = mission.get_operation(6)
-        if not op6 or not op6.time_windows:
+        launch = mission.get_launch_op()
+        if not launch or not launch.time_windows:
             continue
         window_choice = []
-        for win_idx, (ws, we) in enumerate(op6.time_windows):
-            in_window = model.NewBoolVar(f"op6_{op6.op_id}_window_{win_idx}")
+        for win_idx, (ws, we) in enumerate(launch.time_windows):
+            in_window = model.NewBoolVar(f"launch_{launch.op_id}_window_{win_idx}")
             window_choice.append(in_window)
-            model.Add(start_vars[op6.op_id] >= ws).OnlyEnforceIf(in_window)
-            model.Add(end_vars[op6.op_id] <= we).OnlyEnforceIf(in_window)
+            model.Add(start_vars[launch.op_id] >= ws).OnlyEnforceIf(in_window)
+            model.Add(end_vars[launch.op_id] <= we).OnlyEnforceIf(in_window)
         model.AddExactlyOne(window_choice)
-        window_choice_vars[op6.op_id] = window_choice
+        window_choice_vars[launch.op_id] = window_choice
         prev_idx = None
         if prev_plan:
-            prev_assign = prev_plan.get_assignment(op6.op_id)
+            prev_assign = prev_plan.get_assignment(launch.op_id)
             if prev_assign:
-                for idx, (ws, we) in enumerate(op6.time_windows):
+                for idx, (ws, we) in enumerate(launch.time_windows):
                     if prev_assign.start_slot >= ws and prev_assign.end_slot <= we:
                         prev_idx = idx
                         break
-        prev_window_index[op6.op_id] = prev_idx
+        prev_window_index[launch.op_id] = prev_idx
 
     for op_id, frozen in frozen_ops.items():
         if op_id in start_vars:
             model.Add(start_vars[op_id] == frozen.start_slot)
             model.Add(end_vars[op_id] == frozen.end_slot)
 
+    # ========== Anchor Mechanism for Non-Unlock Missions (Stage 2) ==========
+    # 三重锚定策略：
+    #   1. 软位置锚点（soft penalty）：惩罚偏离 prev_plan 位置
+    #   2. 硬窗口锁定（hard constraint）：锁定 launch 窗口选择 = prev_plan 的窗口
+    #   3. 硬序列锁定（via position lock）：通过位置约束间接保持 pad 顺序
+    #
+    # 窗口切换是 drift 的最大来源（kappa_win=12 per switch），硬锁定可消除之。
+    # 软位置锚点保留灵活性，避免 INFEASIBLE。
+    if anchor_fixes is None:
+        anchor_fixes = {}
+    if unlock_mission_ids is None:
+        unlock_mission_ids = set()
+
+    # 识别哪些 mission 被锚定（有 anchor_fix 的 mission）
+    _anchored_mission_ids = set()
+    _anchor_op_to_mission = {}
+    for mission in missions:
+        launch = mission.get_launch_op()
+        pad_hold = mission.get_pad_hold_op()
+        if launch and launch.op_id in anchor_fixes:
+            _anchored_mission_ids.add(mission.mission_id)
+            _anchor_op_to_mission[launch.op_id] = mission.mission_id
+        if pad_hold and pad_hold.op_id in anchor_fixes:
+            _anchored_mission_ids.add(mission.mission_id)
+            _anchor_op_to_mission[pad_hold.op_id] = mission.mission_id
+
+    # 1. 软位置锚点 — 高权重惩罚偏离
+    _ANCHOR_SOFT_WEIGHT = 2000
+    anchor_penalty_terms = []
+    for op_id, anchor_start in anchor_fixes.items():
+        if op_id in start_vars and op_id not in frozen_ops:
+            _a_dev = model.NewIntVar(0, max(1, horizon), f"anchor_dev_{op_id}")
+            _a_diff = model.NewIntVar(-max(1, horizon), max(1, horizon), f"anchor_diff_{op_id}")
+            model.Add(_a_diff == start_vars[op_id] - anchor_start)
+            model.AddAbsEquality(_a_dev, _a_diff)
+            anchor_penalty_terms.append(_ANCHOR_SOFT_WEIGHT * _a_dev)
+
     delay_vars = {}
     for mission in missions:
-        op6 = mission.get_operation(6)
-        if not op6 or op6.op_id not in start_vars:
+        launch = mission.get_launch_op()
+        if not launch or launch.op_id not in start_vars:
             continue
         delay_var = model.NewIntVar(0, horizon, f"delay_{mission.mission_id}")
-        model.AddMaxEquality(delay_var, [0, start_vars[op6.op_id] - mission.due])
+        model.AddMaxEquality(delay_var, [0, start_vars[launch.op_id] - mission.due])
         delay_vars[mission.mission_id] = delay_var
 
     total_delay_terms = []
@@ -1083,24 +1392,24 @@ def _solve_v2_1_stage2_with_delay_bound(
 
     if prev_plan:
         for mission in missions:
-            op6 = mission.get_operation(6)
-            op4 = mission.get_operation(4)
-            if op6 and op6.op_id in start_vars:
-                prev_assign = prev_plan.get_assignment(op6.op_id)
+            launch = mission.get_launch_op()
+            pad_hold = mission.get_pad_hold_op()
+            if launch and launch.op_id in start_vars:
+                prev_assign = prev_plan.get_assignment(launch.op_id)
                 if prev_assign:
-                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{op6.op_id}")
-                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{op6.op_id}")
-                    model.Add(diff_var == start_vars[op6.op_id] - prev_assign.start_slot)
+                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{launch.op_id}")
+                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{launch.op_id}")
+                    model.Add(diff_var == start_vars[launch.op_id] - prev_assign.start_slot)
                     model.AddAbsEquality(shift_abs, diff_var)
-                    shift_abs_vars[op6.op_id] = shift_abs
-            if op4 and op4.op_id in start_vars:
-                prev_assign = prev_plan.get_assignment(op4.op_id)
+                    shift_abs_vars[launch.op_id] = shift_abs
+            if pad_hold and pad_hold.op_id in start_vars:
+                prev_assign = prev_plan.get_assignment(pad_hold.op_id)
                 if prev_assign:
-                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{op4.op_id}")
-                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{op4.op_id}")
-                    model.Add(diff_var == start_vars[op4.op_id] - prev_assign.start_slot)
+                    shift_abs = model.NewIntVar(0, max_shift, f"shift_{pad_hold.op_id}")
+                    diff_var = model.NewIntVar(-max_shift, max_shift, f"diff_{pad_hold.op_id}")
+                    model.Add(diff_var == start_vars[pad_hold.op_id] - prev_assign.start_slot)
                     model.AddAbsEquality(shift_abs, diff_var)
-                    shift_abs_vars[op4.op_id] = shift_abs
+                    shift_abs_vars[pad_hold.op_id] = shift_abs
 
     for op_id, choice in window_choice_vars.items():
         prev_idx = prev_window_index.get(op_id)
@@ -1116,11 +1425,11 @@ def _solve_v2_1_stage2_with_delay_bound(
     if prev_plan:
         prev_order = []
         for mission in missions:
-            op4 = mission.get_operation(4)
-            if not op4:
+            pad_hold = mission.get_pad_hold_op()
+            if not pad_hold:
                 continue
-            prev_assign = prev_plan.get_assignment(op4.op_id)
-            if prev_assign and "R_pad" in prev_assign.resources:
+            prev_assign = prev_plan.get_assignment(pad_hold.op_id)
+            if prev_assign and "R_pad" in pad_hold.resources:
                 prev_order.append((mission.mission_id, prev_assign.start_slot))
         prev_order.sort(key=lambda x: x[1])
         for idx in range(1, len(prev_order)):
@@ -1128,9 +1437,9 @@ def _solve_v2_1_stage2_with_delay_bound(
 
     start_op4: Dict[str, cp_model.IntVar] = {}
     for mission in missions:
-        op4 = mission.get_operation(4)
-        if op4 and op4.op_id in start_vars:
-            start_op4[mission.mission_id] = start_vars[op4.op_id]
+        pad_hold = mission.get_pad_hold_op()
+        if pad_hold and pad_hold.op_id in start_vars:
+            start_op4[mission.mission_id] = start_vars[pad_hold.op_id]
 
     for mission in missions:
         pred_id = prev_pred.get(mission.mission_id)
@@ -1168,25 +1477,54 @@ def _solve_v2_1_stage2_with_delay_bound(
 
     scale = 100
     for mission in missions:
-        op6 = mission.get_operation(6)
-        op4 = mission.get_operation(4)
-        if op6 and op6.op_id in shift_abs_vars:
+        launch = mission.get_launch_op()
+        pad_hold = mission.get_pad_hold_op()
+        if launch and launch.op_id in shift_abs_vars:
             weight = int(round(mission.priority * 0.7 * scale))
-            objective_terms.append(weight * shift_abs_vars[op6.op_id])
-        if op4 and op4.op_id in shift_abs_vars:
+            objective_terms.append(weight * shift_abs_vars[launch.op_id])
+        if pad_hold and pad_hold.op_id in shift_abs_vars:
             weight = int(round(mission.priority * 0.3 * scale))
-            objective_terms.append(weight * shift_abs_vars[op4.op_id])
+            objective_terms.append(weight * shift_abs_vars[pad_hold.op_id])
 
-        if op6 and op6.op_id in window_switch_vars:
+        if launch and launch.op_id in window_switch_vars:
             weight = int(round(mission.priority * config.kappa_win * scale))
-            objective_terms.append(weight * window_switch_vars[op6.op_id])
+            objective_terms.append(weight * window_switch_vars[launch.op_id])
 
         if mission.mission_id in seq_switch_vars:
             weight = int(round(mission.priority * config.kappa_seq * scale))
             objective_terms.append(weight * seq_switch_vars[mission.mission_id])
 
+    # drift_v3 目标 + 软锚点惩罚
+    # anchored missions 的窗口已硬锁定（零 window_switch_drift），
+    # 软锚点进一步惩罚位置偏离（减少 shift drift），
+    # unlocked missions 完全自由优化。
+    objective_terms.extend(anchor_penalty_terms)
+
     if objective_terms:
         model.Minimize(sum(objective_terms))
+
+    # ========== Solution Hints (Warm Start) ==========
+    # 用 prev_plan 的位置作为初始解提示，帮助 solver 在时限内找到更好的解。
+    # 对 FEASIBLE（非 OPTIMAL）情况尤其重要：从已知好解出发搜索。
+    if prev_plan:
+        for op_id, sv in start_vars.items():
+            if op_id in frozen_ops:
+                continue  # frozen 已固定，不需要 hint
+            prev_assign = prev_plan.get_assignment(op_id)
+            if prev_assign:
+                model.AddHint(sv, prev_assign.start_slot)
+        for op_id, ev in end_vars.items():
+            if op_id in frozen_ops:
+                continue
+            prev_assign = prev_plan.get_assignment(op_id)
+            if prev_assign:
+                model.AddHint(ev, prev_assign.end_slot)
+        # Hint window choices: choose the same window as prev_plan
+        for op_id, choices in window_choice_vars.items():
+            prev_idx = prev_window_index.get(op_id)
+            if prev_idx is not None and 0 <= prev_idx < len(choices):
+                for i, ch in enumerate(choices):
+                    model.AddHint(ch, 1 if i == prev_idx else 0)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = config.time_limit_seconds
@@ -1244,7 +1582,8 @@ def _solve_v2_1_with_config(
     horizon: int,
     prev_plan: Optional[PlanV2_1],
     frozen_ops: Dict[str, OpAssignment],
-    config: SolverConfigV2_1
+    config: SolverConfigV2_1,
+    anchor_fixes: Optional[Dict[str, int]] = None,
 ) -> SolverResult:
     if not missions:
         return SolverResult(
@@ -1259,6 +1598,13 @@ def _solve_v2_1_with_config(
     for mission in missions:
         all_ops.extend(mission.operations)
 
+    # 构建 wait_op 集合（用语义 helper 而非 hardcoded op_index）
+    wait_op_ids = set()
+    for mission in missions:
+        wait_op = mission.get_wait_op()
+        if wait_op:
+            wait_op_ids.add(wait_op.op_id)
+
     start_vars: Dict[str, cp_model.IntVar] = {}
     end_vars: Dict[str, cp_model.IntVar] = {}
     interval_vars: Dict[str, cp_model.IntervalVar] = {}
@@ -1268,7 +1614,7 @@ def _solve_v2_1_with_config(
         start_vars[op.op_id] = model.NewIntVar(
             op.release, horizon, f"start_{op.op_id}"
         )
-        if op.op_index == 5:
+        if op.op_id in wait_op_ids:
             min_duration = max(0, op.duration)
             max_duration = min_duration + op5_max_wait_slots
             duration_var = model.NewIntVar(
@@ -1301,17 +1647,16 @@ def _solve_v2_1_with_config(
             if pred_id in end_vars:
                 model.Add(start_vars[op.op_id] >= end_vars[pred_id])
 
-    # Pad holding: Op4 -> Op5 -> Op6 must be contiguous
+    # Pad block contiguity: pad_hold -> wait -> launch must be contiguous
     for mission in missions:
-        op4 = mission.get_operation(4)
-        op5 = mission.get_operation(5)
-        op6 = mission.get_operation(6)
-        if not op4 or not op5 or not op6:
+        pad_hold, wait, launch = mission.get_pad_block()
+        if not pad_hold or not wait or not launch:
             continue
-        if op4.op_id in end_vars and op5.op_id in start_vars:
-            model.Add(start_vars[op5.op_id] == end_vars[op4.op_id])
-        if op5.op_id in end_vars and op6.op_id in start_vars:
-            model.Add(start_vars[op6.op_id] == end_vars[op5.op_id])
+        if pad_hold.op_id in end_vars and wait.op_id in start_vars:
+            model.Add(start_vars[wait.op_id] == end_vars[pad_hold.op_id])
+        if wait.op_id in end_vars and launch.op_id in start_vars:
+            model.Add(start_vars[launch.op_id] == end_vars[wait.op_id])
+
     resource_intervals: Dict[str, List[cp_model.IntervalVar]] = {
         r.resource_id: [] for r in resources
     }
@@ -1341,31 +1686,38 @@ def _solve_v2_1_with_config(
     window_choice_vars: Dict[str, List[cp_model.BoolVar]] = {}
     prev_window_index: Dict[str, Optional[int]] = {}
     for mission in missions:
-        op6 = mission.get_operation(6)
-        if not op6 or not op6.time_windows:
+        launch = mission.get_launch_op()
+        if not launch or not launch.time_windows:
             continue
         window_choice = []
-        for win_idx, (ws, we) in enumerate(op6.time_windows):
-            in_window = model.NewBoolVar(f"op6_{op6.op_id}_window_{win_idx}")
+        for win_idx, (ws, we) in enumerate(launch.time_windows):
+            in_window = model.NewBoolVar(f"launch_{launch.op_id}_window_{win_idx}")
             window_choice.append(in_window)
-            model.Add(start_vars[op6.op_id] >= ws).OnlyEnforceIf(in_window)
-            model.Add(end_vars[op6.op_id] <= we).OnlyEnforceIf(in_window)
+            model.Add(start_vars[launch.op_id] >= ws).OnlyEnforceIf(in_window)
+            model.Add(end_vars[launch.op_id] <= we).OnlyEnforceIf(in_window)
         model.AddExactlyOne(window_choice)
-        window_choice_vars[op6.op_id] = window_choice
+        window_choice_vars[launch.op_id] = window_choice
         prev_idx = None
         if prev_plan:
-            prev_assign = prev_plan.get_assignment(op6.op_id)
+            prev_assign = prev_plan.get_assignment(launch.op_id)
             if prev_assign:
-                for idx, (ws, we) in enumerate(op6.time_windows):
+                for idx, (ws, we) in enumerate(launch.time_windows):
                     if prev_assign.start_slot >= ws and prev_assign.end_slot <= we:
                         prev_idx = idx
                         break
-        prev_window_index[op6.op_id] = prev_idx
+        prev_window_index[launch.op_id] = prev_idx
 
     for op_id, frozen in frozen_ops.items():
         if op_id in start_vars:
             model.Add(start_vars[op_id] == frozen.start_slot)
             model.Add(end_vars[op_id] == frozen.end_slot)
+
+    # ========== Anchor Fix (LNS fix-and-optimize) ==========
+    if anchor_fixes is None:
+        anchor_fixes = {}
+    for op_id, anchor_start in anchor_fixes.items():
+        if op_id in start_vars and op_id not in frozen_ops:
+            model.Add(start_vars[op_id] == anchor_start)
 
     objective_terms = []
     max_shift = max(0, horizon)
@@ -1373,11 +1725,11 @@ def _solve_v2_1_with_config(
     switch_vars: Dict[str, cp_model.IntVar] = {}
 
     for mission in missions:
-        op6 = mission.get_operation(6)
-        if not op6 or op6.op_id not in end_vars:
+        launch = mission.get_launch_op()
+        if not launch or launch.op_id not in end_vars:
             continue
         delay_var = model.NewIntVar(0, horizon, f"delay_{mission.mission_id}")
-        model.AddMaxEquality(delay_var, [0, start_vars[op6.op_id] - mission.due])
+        model.AddMaxEquality(delay_var, [0, start_vars[launch.op_id] - mission.due])
         weight = int(config.w_delay * mission.priority * 100)
         objective_terms.append(weight * delay_var)
 

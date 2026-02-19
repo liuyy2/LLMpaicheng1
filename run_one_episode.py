@@ -13,7 +13,7 @@ import sys
 import json
 from datetime import datetime
 
-from config import Config, DEFAULT_CONFIG
+from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY
 from scenario import generate_scenario, save_scenario
 from simulator import simulate_episode, save_episode_logs
 from policies.policy_fixed import FixedWeightPolicy
@@ -47,6 +47,15 @@ def parse_args():
     parser.add_argument(
         "--w-switch", type=float, default=5.0,
         help="Switch weight (default: 5.0)"
+    )
+    parser.add_argument(
+        "--difficulty", type=str, default="medium",
+        choices=["light", "medium", "heavy"],
+        help="Disturbance difficulty preset (default: medium)"
+    )
+    parser.add_argument(
+        "--num-missions", type=int, default=None,
+        help="Override mission count (default: use difficulty preset)"
     )
     return parser.parse_args()
 
@@ -103,7 +112,8 @@ def print_results(result):
     print()
     
     print(f"   Stability Metrics:")
-    print(f"     Episode drift:    {m.episode_drift:.4f}")
+    print(f"     Drift/replan:     {m.drift_per_replan:.6f}  (main)")
+    print(f"     Episode drift:    {m.episode_drift:.4f}  (cumulative)")
     print(f"     Total shifts:     {m.total_shifts}")
     print(f"     Total switches:   {m.total_switches}")
     print()
@@ -169,7 +179,12 @@ def main():
     
     # 1. 生成场景
     print(" Generating scenario...")
-    config = DEFAULT_CONFIG
+    config = make_config_for_difficulty(
+        difficulty=args.difficulty,
+        num_missions_override=args.num_missions,
+    )
+    print(f"  Config: difficulty={args.difficulty}, sim_total_slots={config.sim_total_slots}, "
+          f"num_missions={config.num_missions}")
     scenario = generate_scenario(seed=args.seed, config=config)
     print_scenario_info(scenario)
     
@@ -216,11 +231,17 @@ def main():
     summary = {
         "seed": result.seed,
         "policy": result.policy_name,
+        "difficulty": args.difficulty,
+        "num_missions": len(scenario.missions),
+        "sim_total_slots": config.sim_total_slots,
         "on_time_rate": round(result.metrics.on_time_rate, 4),
         "episode_drift": round(result.metrics.episode_drift, 4),
+        "drift_per_replan": round(result.metrics.drift_per_replan, 6),
+        "drift_per_day": round(result.metrics.drift_per_day, 6),
         "total_delay": result.metrics.total_delay,
         "total_shifts": result.metrics.total_shifts,
         "total_switches": result.metrics.total_switches,
+        "num_replans": result.metrics.num_replans,
         "completion_rate": round(result.metrics.completion_rate, 4),
         "runtime_s": round(result.total_runtime_s, 3)
     }
