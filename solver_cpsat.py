@@ -871,7 +871,7 @@ def _check_anchor_feasibility(
     now: int,
     horizon: int,
     op5_max_wait_slots: int,
-) -> Tuple[Dict[str, int], int]:
+) -> Tuple[Dict[str, int], int, List[str]]:
     """
     为非 unlock 的 mission 计算可行的锚点约束。
 
@@ -1181,7 +1181,7 @@ def _solve_v2_1_two_stage(
 
     result_stage2 = _solve_v2_1_stage2_with_delay_bound(
         missions, resources, horizon, prev_plan, frozen_ops, stage2_config, delay_bound,
-        anchor_fixes={},
+        anchor_fixes=anchor_fixes,
         unlock_mission_ids=unlock_mission_ids,
     )
     if result_stage2.status in [SolveStatus.OPTIMAL, SolveStatus.FEASIBLE]:
@@ -1341,29 +1341,10 @@ def _solve_v2_1_stage2_with_delay_bound(
     if unlock_mission_ids is None:
         unlock_mission_ids = set()
 
-    # 识别哪些 mission 被锚定（有 anchor_fix 的 mission）
-    _anchored_mission_ids = set()
-    _anchor_op_to_mission = {}
-    for mission in missions:
-        launch = mission.get_launch_op()
-        pad_hold = mission.get_pad_hold_op()
-        if launch and launch.op_id in anchor_fixes:
-            _anchored_mission_ids.add(mission.mission_id)
-            _anchor_op_to_mission[launch.op_id] = mission.mission_id
-        if pad_hold and pad_hold.op_id in anchor_fixes:
-            _anchored_mission_ids.add(mission.mission_id)
-            _anchor_op_to_mission[pad_hold.op_id] = mission.mission_id
-
-    # 1. 软位置锚点 — 高权重惩罚偏离
-    _ANCHOR_SOFT_WEIGHT = 2000
-    anchor_penalty_terms = []
+    # 非 unlock mission 的 anchor op 做硬锚定，形成真正的 local fix-and-optimize。
     for op_id, anchor_start in anchor_fixes.items():
         if op_id in start_vars and op_id not in frozen_ops:
-            _a_dev = model.NewIntVar(0, max(1, horizon), f"anchor_dev_{op_id}")
-            _a_diff = model.NewIntVar(-max(1, horizon), max(1, horizon), f"anchor_diff_{op_id}")
-            model.Add(_a_diff == start_vars[op_id] - anchor_start)
-            model.AddAbsEquality(_a_dev, _a_diff)
-            anchor_penalty_terms.append(_ANCHOR_SOFT_WEIGHT * _a_dev)
+            model.Add(start_vars[op_id] == anchor_start)
 
     delay_vars = {}
     for mission in missions:
@@ -1498,8 +1479,6 @@ def _solve_v2_1_stage2_with_delay_bound(
     # anchored missions 的窗口已硬锁定（零 window_switch_drift），
     # 软锚点进一步惩罚位置偏离（减少 shift drift），
     # unlocked missions 完全自由优化。
-    objective_terms.extend(anchor_penalty_terms)
-
     if objective_terms:
         model.Minimize(sum(objective_terms))
 

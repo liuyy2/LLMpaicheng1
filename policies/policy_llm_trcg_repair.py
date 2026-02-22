@@ -404,17 +404,16 @@ class TRCGRepairPolicy(BasePolicy):
         _pressure = trcg_dict.get('bottleneck_pressure', {})
         _max_pressure = max(_pressure.values(), default=0.0) if _pressure else 0.0
 
-        if len(_conflicts) == 0 and len(_urgents) <= 2 and _max_pressure < 0.7:
-            # 低冲突/低压力：大幅放宽 epsilon，让 Stage 2 全力优化 drift
-            adaptive_epsilon = 0.30
-        elif len(_conflicts) <= 3 and _max_pressure < 0.85:
-            # 中等冲突：适度放宽
-            adaptive_epsilon = 0.22
+        base_epsilon = max(0.10, decision.epsilon_solver, config.default_epsilon_solver)
+        if len(_conflicts) == 0 and len(_urgents) <= 1 and _max_pressure < 0.6:
+            adaptive_epsilon = min(0.12, base_epsilon + 0.02)
+        elif len(_conflicts) <= 2 and _max_pressure < 0.8:
+            adaptive_epsilon = min(0.11, base_epsilon + 0.01)
         else:
-            # 高冲突/高压力：仍然比 FT(0.10) 更激进
-            adaptive_epsilon = 0.15
+            adaptive_epsilon = base_epsilon
 
-        epsilon_solver = max(adaptive_epsilon, decision.epsilon_solver, config.default_epsilon_solver)
+        # Keep delay budget close to fixed_tuned (0.10) to avoid delay inflation.
+        epsilon_solver = min(0.12, adaptive_epsilon)
 
         # 策略确定 epsilon: 使用自适应 epsilon 而非固定值
         # TRCG selective freezing 已在 simulator 层面保证低 drift，
@@ -448,31 +447,30 @@ class TRCGRepairPolicy(BasePolicy):
         # 从 TRCG 冲突邻居和 urgent missions 中补充，使 unlock 集合至少包含 3 个 mission，
         # 给 solver 更多优化空间。cap 到 active 的 50% 以保留 anchor 引导效果。
         # 降低 unlock 上限：更少 mission 被解锁 → 更多被锚定 → 更低 drift
-        _MIN_UNLOCK = 1
+        _MIN_UNLOCK = 3
         _MAX_UNLOCK_RATIO = 0.25  # 最多解锁 25% active mission
         _max_unlock = max(_MIN_UNLOCK, int(len(active_mission_ids) * _MAX_UNLOCK_RATIO))
         _unlock_set = set(_valid_unlock)
         _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
+        _target_unlock = min(len(_eligible), _MIN_UNLOCK)
 
-        # 仅当 unlock 为空时从冲突中补充，且上限更严格
-        if len(_unlock_set) == 0:
-            # 从 TRCG 冲突邻居中补充（按 severity 降序）
+        # 即使 LLM 只给了 1 个 root，也要补齐局部邻域，避免单点解锁退化为“尾部追加”。
+        if len(_unlock_set) < _target_unlock:
             conflicts = trcg_dict.get('top_conflicts', [])
             for c in sorted(conflicts, key=lambda x: -float(x.get('severity', 0))):
                 for m in (c.get('a', ''), c.get('b', '')):
                     if m in _eligible and m not in _unlock_set and len(_unlock_set) < _max_unlock:
                         _unlock_set.add(m)
-                if len(_unlock_set) >= _MIN_UNLOCK:
+                if len(_unlock_set) >= _target_unlock:
                     break
 
-        if len(_unlock_set) == 0:
-            # 从 urgent missions 中补充（按 urgency_score 升序 = 越紧迫越优先）
+        if len(_unlock_set) < _target_unlock:
             urgents = trcg_dict.get('urgent_missions', [])
             for u in sorted(urgents, key=lambda x: x.get('urgency_score', 9999)):
                 mid = u.get('mission_id', '')
                 if mid in _eligible and mid not in _unlock_set and len(_unlock_set) < _max_unlock:
                     _unlock_set.add(mid)
-                if len(_unlock_set) >= _MIN_UNLOCK:
+                if len(_unlock_set) >= _target_unlock:
                     break
 
         _valid_unlock = list(_unlock_set)
@@ -838,28 +836,29 @@ class TRCGRepairPolicy(BasePolicy):
         ]
 
         # ---- 扩展 unlock 集合（与 Step 6 逻辑一致：更严格的上限）----
-        _MIN_UNLOCK = 1
+        _MIN_UNLOCK = 3
         _MAX_UNLOCK_RATIO = 0.25
         _max_unlock = max(_MIN_UNLOCK, int(len(active_mission_ids) * _MAX_UNLOCK_RATIO))
         _unlock_set = set(valid_unlock)
         _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
+        _target_unlock = min(len(_eligible), _MIN_UNLOCK)
 
-        if len(_unlock_set) == 0:
+        if len(_unlock_set) < _target_unlock:
             conflicts = trcg_dict.get('top_conflicts', [])
             for c in sorted(conflicts, key=lambda x: -float(x.get('severity', 0))):
                 for m in (c.get('a', ''), c.get('b', '')):
                     if m in _eligible and m not in _unlock_set and len(_unlock_set) < _max_unlock:
                         _unlock_set.add(m)
-                if len(_unlock_set) >= _MIN_UNLOCK:
+                if len(_unlock_set) >= _target_unlock:
                     break
 
-        if len(_unlock_set) == 0:
+        if len(_unlock_set) < _target_unlock:
             urgents = trcg_dict.get('urgent_missions', [])
             for u in sorted(urgents, key=lambda x: x.get('urgency_score', 9999)):
                 mid = u.get('mission_id', '')
                 if mid in _eligible and mid not in _unlock_set and len(_unlock_set) < _max_unlock:
                     _unlock_set.add(mid)
-                if len(_unlock_set) >= _MIN_UNLOCK:
+                if len(_unlock_set) >= _target_unlock:
                     break
 
         valid_unlock = list(_unlock_set)
@@ -881,13 +880,14 @@ class TRCGRepairPolicy(BasePolicy):
         _urgents = trcg_dict.get('urgent_missions', [])
         _pressure = trcg_dict.get('bottleneck_pressure', {})
         _max_p = max(_pressure.values(), default=0.0) if _pressure else 0.0
-        if len(_conflicts) == 0 and len(_urgents) <= 2 and _max_p < 0.7:
-            _adaptive_eps = 0.15
-        elif len(_conflicts) <= 3 and _max_p < 0.85:
-            _adaptive_eps = 0.12
+        _base_eps = max(0.10, config.default_epsilon_solver)
+        if len(_conflicts) == 0 and len(_urgents) <= 1 and _max_p < 0.6:
+            _adaptive_eps = min(0.12, _base_eps + 0.02)
+        elif len(_conflicts) <= 2 and _max_p < 0.8:
+            _adaptive_eps = min(0.11, _base_eps + 0.01)
         else:
-            _adaptive_eps = 0.10
-        epsilon_solver = max(_adaptive_eps, config.default_epsilon_solver)
+            _adaptive_eps = _base_eps
+        epsilon_solver = min(0.12, _adaptive_eps)
 
         # 始终使用锚点约束（空 = 全锚定，非空 = 仅解锁指定 mission）
         use_unlock = tuple(valid_unlock)

@@ -1091,45 +1091,6 @@ def _simulate_episode_v2_1(
             if meta_params and meta_params.unlock_mission_ids is not None:
                 unlock_set = set(meta_params.unlock_mission_ids)
 
-            # ---- TRCG-Guided Selective Freezing ----
-            # 对非 unlock 的 mission，将其 prev_plan 位置加入 frozen_ops。
-            # 这比 solver 内部的锚点更有效：
-            #   1. 冻结的 op 从 drift 指标中排除 → 精确零 drift
-            #   2. 减少 solver 变量数 → 更快求解
-            #   3. 仅冻结通过可行性检查的 op（安全）
-            # 使用 _check_anchor_feasibility 确保冻结位置不与资源/窗口冲突。
-            _trcg_extra_frozen = 0
-            if (unlock_set is not None
-                    and state.current_plan is not None
-                    and len(missions_to_schedule) > 0):
-                from solver_cpsat import _check_anchor_feasibility
-                _anchor_fixes, _anchor_skipped, _anchor_missions = _check_anchor_feasibility(
-                    missions_to_schedule,
-                    state.resources,
-                    state.current_plan,
-                    unlock_set,
-                    frozen_ops,
-                    now,
-                    solver_horizon,
-                    solver_config.op5_max_wait_slots,
-                )
-                # 将通过可行性检查的锚点添加到 frozen_ops
-                # 这样它们在 solver 中被硬冻结，在 drift metric 中被排除
-                for op_id, anchor_start in _anchor_fixes.items():
-                    if op_id not in frozen_ops:
-                        # 找到对应 operation 的信息
-                        for m in missions_to_schedule:
-                            for op in m.operations:
-                                if op.op_id == op_id:
-                                    prev_assign = state.current_plan.get_assignment(op_id)
-                                    if prev_assign:
-                                        frozen_ops[op_id] = prev_assign
-                                        _trcg_extra_frozen += 1
-                                    break
-                            else:
-                                continue
-                            break
-
             result = solve_v2_1(
                 missions=missions_to_schedule,
                 resources=state.resources,

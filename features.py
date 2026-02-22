@@ -896,13 +896,22 @@ def _trcg_detect_conflicts(
     missions: List[Mission],
     projected: Dict[str, Tuple[int, int]],
     completed_ops: Set[str],
+    near_gap_slots: int = 8,
+    near_gap_weight: float = 0.6,
     max_n: int = 10,
 ) -> List[Dict[str, Any]]:
     """
-    在投影区间上检测资源时间冲突（仅 R_pad / R3 / R_range_test）。
+    在投影区间上检测资源时间冲突（R_pad / R3 / R_range_test）。
 
     同一 mission 内的 op 不算冲突；零时长 op 跳过。
-    severity = overlap_slots * (priority_a + priority_b)。
+    冲突分两类：
+    1) overlap: 区间重叠
+    2) near_queue: 区间不重叠但间隔 gap <= near_gap_slots（表示紧密排队、低余量）
+
+    severity:
+    - overlap: overlap_slots * (priority_a + priority_b)
+    - near_queue: (near_gap_slots - gap + 1) * (priority_a + priority_b) * near_gap_weight
+
     返回 severity 降序排列的前 max_n 条。
     """
     mission_map = {m.mission_id: m for m in missions}
@@ -923,8 +932,7 @@ def _trcg_detect_conflicts(
                 if rid in res_entries:
                     res_entries[rid].append((mission.mission_id, s, e))
 
-    conflicts: List[Dict[str, Any]] = []
-    seen: Set[Tuple[str, str, str]] = set()
+    conflict_by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
     for rid, entries in res_entries.items():
         n = len(entries)
@@ -935,23 +943,43 @@ def _trcg_detect_conflicts(
                 if m_a == m_b:
                     continue
                 key = (min(m_a, m_b), max(m_a, m_b), rid)
-                if key in seen:
-                    continue
+
                 overlap = min(e_a, e_b) - max(s_a, s_b)
-                if overlap <= 0:
-                    continue
-                seen.add(key)
                 p_a = mission_map[m_a].priority
                 p_b = mission_map[m_b].priority
-                conflicts.append({
-                    'a': m_a,
-                    'b': m_b,
-                    'resource': rid,
-                    'overlap_slots': overlap,
-                    't_range': [max(s_a, s_b), min(e_a, e_b)],
-                    'severity': round(overlap * (p_a + p_b), 2),
-                })
 
+                if overlap > 0:
+                    candidate = {
+                        'a': m_a,
+                        'b': m_b,
+                        'resource': rid,
+                        'conflict_type': 'overlap',
+                        'overlap_slots': overlap,
+                        'gap_slots': 0,
+                        't_range': [max(s_a, s_b), min(e_a, e_b)],
+                        'severity': round(overlap * (p_a + p_b), 2),
+                    }
+                else:
+                    gap = max(s_a, s_b) - min(e_a, e_b)
+                    if gap > near_gap_slots:
+                        continue
+                    tightness = max(1, near_gap_slots - gap + 1)
+                    candidate = {
+                        'a': m_a,
+                        'b': m_b,
+                        'resource': rid,
+                        'conflict_type': 'near_queue',
+                        'overlap_slots': 0,
+                        'gap_slots': gap,
+                        't_range': [min(e_a, e_b), max(s_a, s_b)],
+                        'severity': round(tightness * (p_a + p_b) * near_gap_weight, 2),
+                    }
+
+                prev = conflict_by_key.get(key)
+                if prev is None or candidate['severity'] > prev['severity']:
+                    conflict_by_key[key] = candidate
+
+    conflicts: List[Dict[str, Any]] = list(conflict_by_key.values())
     conflicts.sort(key=lambda c: c['severity'], reverse=True)
     return conflicts[:max_n]
 
