@@ -692,6 +692,7 @@ def _expand_unlock_from_conflicts(
     trcg_dict: Dict[str, Any],
     eligible_ids: Set[str],
     expand_count: int = 2,
+    max_unlock: int = 8,
 ) -> List[str]:
     """
     从 TRCG conflict edges 中按 severity 次高顺序扩大 unlock_set。
@@ -700,7 +701,7 @@ def _expand_unlock_from_conflicts(
     1. 收集所有冲突边中涉及的 mission（但不在当前 unlock 中）
     2. 按该 mission 的 Σ severity 降序排列
     3. 取前 expand_count 个加入
-    4. 不超过 5 个总上限
+    4. 不超过 max_unlock 总上限
     """
     conflicts: List[Dict[str, Any]] = trcg_dict.get('top_conflicts', [])
     current_set = set(current_unlock)
@@ -717,9 +718,36 @@ def _expand_unlock_from_conflicts(
 
     expanded = list(current_unlock)
     for m in candidates:
-        if len(expanded) >= 8:   # unlock_mission_ids 上限
+        if len(expanded) >= max_unlock:
             break
         if m not in current_set:
+            expanded.append(m)
+            current_set.add(m)
+            expand_count -= 1
+            if expand_count <= 0:
+                break
+
+    # 冲突图稀疏时，补齐到目标扩展规模，避免回退链空转。
+    if expand_count > 0:
+        urgents = trcg_dict.get("urgent_missions", []) or []
+        for u in sorted(urgents, key=lambda x: float(x.get("urgency_score", 9999.0))):
+            if len(expanded) >= max_unlock:
+                break
+            m = u.get("mission_id", "")
+            if not isinstance(m, str) or not m or m in current_set or m not in eligible_ids:
+                continue
+            expanded.append(m)
+            current_set.add(m)
+            expand_count -= 1
+            if expand_count <= 0:
+                break
+
+    if expand_count > 0:
+        for m in sorted(eligible_ids):
+            if len(expanded) >= max_unlock:
+                break
+            if m in current_set:
+                continue
             expanded.append(m)
             current_set.add(m)
             expand_count -= 1
@@ -732,53 +760,25 @@ def _expand_unlock_from_conflicts(
 def solve_with_fallback_chain(
     decision: RepairDecision,
     trcg_dict: Dict[str, Any],
-    missions: List,               # List[Mission]
-    resources: List,              # List[Resource]
+    missions: List,
+    resources: List,
     horizon: int,
-    prev_plan: Any,               # Optional[PlanV2_1]
-    frozen_ops: Dict,             # Dict[str, OpAssignment]
+    prev_plan: Any,
+    frozen_ops: Dict,
     now: int,
     eligible_ids: Set[str],
-    solver_config_base: Any,      # SolverConfigV2_1 — 基础配置模板
-    compute_frozen_ops_fn=None,   # 可选：重新计算 frozen_ops 的函数
-    current_plan_for_refreeze: Any = None,  # 降 freeze 时用的 current_plan
+    solver_config_base: Any,
+    compute_frozen_ops_fn=None,
+    current_plan_for_refreeze: Any = None,
     started_ops: Optional[Set[str]] = None,
     completed_ops: Optional[Set[str]] = None,
 ) -> FallbackChainResult:
-    """
-    带回退链路的求解。最多 3+1 次 solver 调用（initial + 3 attempts），
-    若全部失败则最终回退到全局重排。
-
-    流程
-    ----
-    0. initial：按 decision 的参数求解（带锚点）
-    1. attempt1_expand_unlock：扩大 unlock_set +2
-    2. attempt2_reduce_freeze：降低 freeze_horizon 一档
-    3. attempt3_relax_epsilon：放宽 epsilon 一档
-    4. final_global_replan：保留原始 freeze_horizon, eps=0.10, 全 unlock, 无锚点
-       （最坏情况=fixed_tuned，不会产生比固定基线更差的灾难性 drift 事件）
-
-    Parameters
-    ----------
-    decision : RepairDecision
-    trcg_dict : TRCGSummary.to_dict()
-    missions, resources, horizon, prev_plan, frozen_ops, now : solver 参数
-    eligible_ids : 可解锁的 mission 集合
-    solver_config_base : SolverConfigV2_1 基础模板
-    compute_frozen_ops_fn : Optional callable(current_plan, now, freeze_slots,
-                            started_ops, completed_ops) → Dict[str, OpAssignment]
-    current_plan_for_refreeze : 重新计算 frozen_ops 时使用的 plan
-    started_ops, completed_ops : 已开始/完成 ops 集合
-
-    Returns
-    -------
-    FallbackChainResult
-    """
-    # 延迟导入 solver（避免循环依赖）
+    """Run TRCG fallback chain with progressive relaxations before global fallback."""
     from solver_cpsat import (
         solve_v2_1, SolverConfigV2_1, SolveStatus,
         compute_frozen_ops as _default_compute_frozen_ops,
     )
+
     if compute_frozen_ops_fn is None:
         compute_frozen_ops_fn = _default_compute_frozen_ops
     if started_ops is None:
@@ -793,7 +793,6 @@ def solve_with_fallback_chain(
         return status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
 
     def _make_config(eps: float) -> SolverConfigV2_1:
-        """基于 solver_config_base 派生新 config，仅修改 epsilon。"""
         return SolverConfigV2_1(
             horizon_slots=solver_config_base.horizon_slots,
             w_delay=solver_config_base.w_delay,
@@ -817,13 +816,11 @@ def solve_with_fallback_chain(
         use_anchor: bool,
         frozen_ops_override: Optional[Dict] = None,
     ) -> Tuple[Any, FallbackAttempt]:
-        """执行一次求解并记录日志。"""
         nonlocal total_calls
         total_calls += 1
 
         cfg = _make_config(epsilon)
         fops = frozen_ops_override if frozen_ops_override is not None else frozen_ops
-
         unlock_set = set(unlock_ids) if use_anchor else None
 
         result = solve_v2_1(
@@ -853,125 +850,238 @@ def solve_with_fallback_chain(
         )
 
         logger.info(
-            "fallback_chain %s: status=%s time=%dms anchors=%d/%d "
-            "unlock=%s freeze_h=%d eps=%.3f",
-            attempt_name, result.status.value, result.solve_time_ms,
-            result.anchor_fix_applied_count, result.anchor_fix_skipped_count,
-            unlock_ids, freeze_hours, epsilon,
+            'fallback_chain %s: status=%s time=%dms anchors=%d/%d unlock=%s freeze_h=%d eps=%.3f',
+            attempt_name,
+            result.status.value,
+            result.solve_time_ms,
+            result.anchor_fix_applied_count,
+            result.anchor_fix_skipped_count,
+            unlock_ids,
+            freeze_hours,
+            epsilon,
         )
 
         return result, attempt
 
-    # 当前工作参数（逐步变异）
     cur_unlock = list(decision.unlock_mission_ids)
     cur_freeze_h = decision.freeze_horizon_hours
     cur_epsilon = decision.epsilon_solver
 
-    # ================================================================
-    # Step 0: initial 求解
-    # ================================================================
-    result, attempt = _solve_once(
-        "initial", cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True
-    )
+    result, attempt = _solve_once('initial', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True)
     attempts.append(attempt)
-
     if _is_success(result.status):
         return FallbackChainResult(
-            solver_result=result, success=True, attempts=attempts,
-            final_attempt_name="initial", total_solver_calls=total_calls,
-        )
-
-    # ================================================================
-    # Step 1: attempt1 — 扩大 unlock_set (+2)
-    # ================================================================
-    cur_unlock = _expand_unlock_from_conflicts(
-        cur_unlock, trcg_dict, eligible_ids, expand_count=2
-    )
-
-    result, attempt = _solve_once(
-        "attempt1_expand_unlock", cur_unlock, cur_freeze_h, cur_epsilon,
-        use_anchor=True,
-    )
-    attempts.append(attempt)
-
-    if _is_success(result.status):
-        return FallbackChainResult(
-            solver_result=result, success=True, attempts=attempts,
-            final_attempt_name="attempt1_expand_unlock",
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='initial',
             total_solver_calls=total_calls,
         )
 
-    # ================================================================
-    # Step 2: attempt2 — 降低 freeze_horizon 一档
-    # ================================================================
+    cur_unlock = _expand_unlock_from_conflicts(
+        cur_unlock, trcg_dict, eligible_ids, expand_count=2, max_unlock=8
+    )
+    result, attempt = _solve_once(
+        'attempt1_expand_unlock', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt1_expand_unlock',
+            total_solver_calls=total_calls,
+        )
+
+    cur_unlock = _expand_unlock_from_conflicts(
+        cur_unlock, trcg_dict, eligible_ids, expand_count=4, max_unlock=12
+    )
+    result, attempt = _solve_once(
+        'attempt1b_expand_unlock_wide', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt1b_expand_unlock_wide',
+            total_solver_calls=total_calls,
+        )
+
     new_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, 0)
     if new_freeze_h == cur_freeze_h:
-        new_freeze_h = 0  # 已经是 0 就保持 0
+        new_freeze_h = 0
 
-    # 重新计算 frozen_ops
     new_freeze_slots = FREEZE_HOURS_TO_SLOTS.get(new_freeze_h, 0)
     recomputed_frozen = frozen_ops
-    if current_plan_for_refreeze is not None and new_freeze_slots != FREEZE_HOURS_TO_SLOTS.get(cur_freeze_h, 0):
+    if (
+        current_plan_for_refreeze is not None
+        and new_freeze_slots != FREEZE_HOURS_TO_SLOTS.get(cur_freeze_h, 0)
+    ):
         recomputed_frozen = compute_frozen_ops_fn(
-            current_plan_for_refreeze, now, new_freeze_slots,
-            started_ops, completed_ops,
+            current_plan_for_refreeze,
+            now,
+            new_freeze_slots,
+            started_ops,
+            completed_ops,
         )
 
     cur_freeze_h = new_freeze_h
-
     result, attempt = _solve_once(
-        "attempt2_reduce_freeze", cur_unlock, cur_freeze_h, cur_epsilon,
-        use_anchor=True, frozen_ops_override=recomputed_frozen,
+        'attempt2_reduce_freeze',
+        cur_unlock,
+        cur_freeze_h,
+        cur_epsilon,
+        use_anchor=True,
+        frozen_ops_override=recomputed_frozen,
     )
     attempts.append(attempt)
-
     if _is_success(result.status):
         return FallbackChainResult(
-            solver_result=result, success=True, attempts=attempts,
-            final_attempt_name="attempt2_reduce_freeze",
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt2_reduce_freeze',
             total_solver_calls=total_calls,
         )
 
-    # ================================================================
-    # Step 3: attempt3 — 放宽 epsilon 一档
-    # ================================================================
+    deep_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, 0)
+    if deep_freeze_h < cur_freeze_h:
+        deep_frozen = recomputed_frozen
+        if current_plan_for_refreeze is not None:
+            deep_slots = FREEZE_HOURS_TO_SLOTS.get(deep_freeze_h, 0)
+            deep_frozen = compute_frozen_ops_fn(
+                current_plan_for_refreeze,
+                now,
+                deep_slots,
+                started_ops,
+                completed_ops,
+            )
+        cur_freeze_h = deep_freeze_h
+        recomputed_frozen = deep_frozen
+        result, attempt = _solve_once(
+            'attempt2b_reduce_freeze_deep',
+            cur_unlock,
+            cur_freeze_h,
+            cur_epsilon,
+            use_anchor=True,
+            frozen_ops_override=recomputed_frozen,
+        )
+        attempts.append(attempt)
+        if _is_success(result.status):
+            return FallbackChainResult(
+                solver_result=result,
+                success=True,
+                attempts=attempts,
+                final_attempt_name='attempt2b_reduce_freeze_deep',
+                total_solver_calls=total_calls,
+            )
+
     cur_epsilon = _EPSILON_STEP_UP.get(cur_epsilon, 0.10)
-
     result, attempt = _solve_once(
-        "attempt3_relax_epsilon", cur_unlock, cur_freeze_h, cur_epsilon,
-        use_anchor=True, frozen_ops_override=recomputed_frozen,
+        'attempt3_relax_epsilon',
+        cur_unlock,
+        cur_freeze_h,
+        cur_epsilon,
+        use_anchor=True,
+        frozen_ops_override=recomputed_frozen,
     )
     attempts.append(attempt)
-
     if _is_success(result.status):
         return FallbackChainResult(
-            solver_result=result, success=True, attempts=attempts,
-            final_attempt_name="attempt3_relax_epsilon",
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt3_relax_epsilon',
             total_solver_calls=total_calls,
         )
 
-    # ================================================================
-    # Step 4: 最终回退 — 保留 freeze + 使用全 unlock（仍有软锚点惩罚作用）
-    # ================================================================
-    logger.warning(
-        "fallback_chain: all 3 attempts failed, falling back to graceful global replan"
+    wide_target = max(12, int(len(eligible_ids) * 0.45))
+    wide_target = min(max(8, wide_target), max(8, len(eligible_ids)))
+    cur_unlock = _expand_unlock_from_conflicts(
+        cur_unlock,
+        trcg_dict,
+        eligible_ids,
+        expand_count=max(4, wide_target - len(cur_unlock)),
+        max_unlock=wide_target,
     )
+    relaxed_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, cur_freeze_h)
+    if relaxed_freeze_h < cur_freeze_h and current_plan_for_refreeze is not None:
+        relaxed_slots = FREEZE_HOURS_TO_SLOTS.get(relaxed_freeze_h, 0)
+        recomputed_frozen = compute_frozen_ops_fn(
+            current_plan_for_refreeze,
+            now,
+            relaxed_slots,
+            started_ops,
+            completed_ops,
+        )
+        cur_freeze_h = relaxed_freeze_h
+    cur_epsilon = max(cur_epsilon, 0.12)
+    result, attempt = _solve_once(
+        'attempt3b_wide_unlock_relaxed',
+        cur_unlock,
+        cur_freeze_h,
+        cur_epsilon,
+        use_anchor=True,
+        frozen_ops_override=recomputed_frozen,
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt3b_wide_unlock_relaxed',
+            total_solver_calls=total_calls,
+        )
 
-    # 使用原始 freeze_horizon（不是 0！），只全部 unlock
-    # 即使全 unlock，solver Stage 2 的 drift 目标函数仍然惩罚移动，
-    # 比完全没有 anchor penalty 的 None 更好。
+    partial_target = max(len(cur_unlock), int(len(eligible_ids) * 0.70))
+    partial_target = min(max(10, partial_target), max(10, len(eligible_ids)))
+    cur_unlock = _expand_unlock_from_conflicts(
+        cur_unlock,
+        trcg_dict,
+        eligible_ids,
+        expand_count=max(6, partial_target - len(cur_unlock)),
+        max_unlock=partial_target,
+    )
+    cur_epsilon = max(cur_epsilon, 0.12)
+    result, attempt = _solve_once(
+        'attempt3c_partial_global_anchor',
+        cur_unlock,
+        cur_freeze_h,
+        cur_epsilon,
+        use_anchor=True,
+        frozen_ops_override=recomputed_frozen,
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt3c_partial_global_anchor',
+            total_solver_calls=total_calls,
+        )
+
+    logger.warning('fallback_chain: all attempts failed, falling back to graceful global replan')
+
     original_freeze_slots = FREEZE_HOURS_TO_SLOTS.get(decision.freeze_horizon_hours, 0)
     global_frozen = compute_frozen_ops_fn(
-        current_plan_for_refreeze, now, original_freeze_slots,
-        started_ops, completed_ops,
+        current_plan_for_refreeze,
+        now,
+        original_freeze_slots,
+        started_ops,
+        completed_ops,
     ) if current_plan_for_refreeze is not None else {}
 
     result, attempt = _solve_once(
-        "final_global_replan",
-        sorted(eligible_ids),  # 全 unlock（所有 mission 可移动）
-        decision.freeze_horizon_hours,  # 保留原始 freeze 小时数（非 0）
-        0.15,   # epsilon 放宽但仍有约束
-        use_anchor=True,   # 仍使用锚点（全 unlock = 所有 mission 跳过锚点检查，但保留框架）
+        'final_global_replan',
+        sorted(eligible_ids),
+        decision.freeze_horizon_hours,
+        max(0.06, min(0.09, cur_epsilon)),
+        use_anchor=True,
         frozen_ops_override=global_frozen,
     )
     attempts.append(attempt)
@@ -980,7 +1090,7 @@ def solve_with_fallback_chain(
         solver_result=result,
         success=_is_success(result.status),
         attempts=attempts,
-        final_attempt_name="final_global_replan",
+        final_attempt_name='final_global_replan',
         total_solver_calls=total_calls,
     )
 
@@ -1044,6 +1154,7 @@ class RepairStepLog:
     anchor_fix_applied_missions: List[str] = field(default_factory=list)
     anchor_fix_applied_vars: Dict[str, int] = field(default_factory=dict)
     anchor_fix_skip_reason: str = ""
+    anchor_fix_diagnostics: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1139,6 +1250,9 @@ def build_repair_step_log(
             )
             log.anchor_fix_skip_reason = getattr(
                 chain_result.solver_result, 'anchor_fix_skip_reason', ''
+            )
+            log.anchor_fix_diagnostics = getattr(
+                chain_result.solver_result, 'anchor_fix_diagnostics', {}
             )
 
     return log

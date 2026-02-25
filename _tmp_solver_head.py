@@ -1,4 +1,4 @@
-"""
+﻿"""
 CP-SAT 求解器模块 - 火箭发射排程
 OR-Tools CP-SAT 实现，支持 pad 分配、窗口约束、冻结、稳定性惩罚
 """
@@ -203,7 +203,6 @@ class SolverResult:
     anchor_fix_applied_missions: List[str] = field(default_factory=list)  # 被锚定的 mission ID 列表
     anchor_fix_applied_vars: Dict[str, int] = field(default_factory=dict) # {op_id: fixed_start_slot}
     anchor_fix_skip_reason: str = ""          # 空="正常施加" / no_prev_plan / unlock_all / all_infeasible
-    anchor_fix_diagnostics: Dict[str, int] = field(default_factory=dict)   # 锚点诊断计数
 
 
 @dataclass
@@ -872,24 +871,48 @@ def _check_anchor_feasibility(
     now: int,
     horizon: int,
     op5_max_wait_slots: int,
-) -> Tuple[Dict[str, int], int, List[str], Dict[str, int]]:
+) -> Tuple[Dict[str, int], int, List[str]]:
     """
-    Compute feasible anchor fixes for non-unlocked missions.
+    为非 unlock 的 mission 计算可行的锚点约束。
 
-    Returns (anchor_fixes, skipped, anchored_missions, diagnostics).
+    对每个不在 unlock_set 中的 mission，尝试将 Op4_start 和 Op6_start
+    固定到 prev_plan 中的时间。在添加约束之前进行可行性检查：
+      1. old_start >= now 且 < horizon
+      2. Op6：old interval 必须落在当前 candidate windows 内
+      3. Op4/Op6：old interval 不得与 resource.unavailable 重叠
+      4. 隐含 Op5 时长 = Op6_start - (Op4_start + Op4_dur) 须在 [0, max_wait]
+    已被 frozen 或 started/completed 的 op 不施加锚点（它们已有约束）。
+
+    Returns
+    -------
+    anchor_fixes : Dict[op_id, fixed_start_slot]
+        可行的锚点约束，key 是 op_id，value 是需要固定的 start slot。
+    skipped_count : int
+        因不可行而跳过的 mission 数。
+    anchored_mission_ids : List[str]
+        成功被锚定的 mission ID 列表。
     """
+    # 资源不可用区间查找表
     res_unavail: Dict[str, List[Tuple[int, int]]] = {}
     for r in resources:
         res_unavail[r.resource_id] = r.unavailable
 
-    def _interval_overlaps_unavailable(start: int, end: int, res_ids: List[str]) -> bool:
+    def _interval_overlaps_unavailable(
+        start: int, end: int, res_ids: List[str]
+    ) -> bool:
+        """检查 [start, end) 是否与任一资源的 unavailable 区间重叠。"""
         for rid in res_ids:
             for cs, ce in res_unavail.get(rid, []):
+                # 模型中 unavailable 覆盖 [cs, ce] 闭区间 → 区间 [cs, ce+1)
+                # op 区间 [start, end)
                 if start <= ce and cs < end:
                     return True
         return False
 
-    def _fits_in_window(start: int, end: int, windows: List[Tuple[int, int]]) -> bool:
+    def _fits_in_window(
+        start: int, end: int, windows: List[Tuple[int, int]]
+    ) -> bool:
+        """检查 [start, end) 是否完整落在某个 time_window [ws, we] 内。"""
         for ws, we in windows:
             if start >= ws and end <= we:
                 return True
@@ -898,88 +921,69 @@ def _check_anchor_feasibility(
     anchor_fixes: Dict[str, int] = {}
     skipped = 0
     anchored_missions: List[str] = []
-    diagnostics: Dict[str, int] = {
-        "non_unlock_total": 0,
-        "candidate_checked": 0,
-        "candidate_pass_basic": 0,
-        "skip_missing_structure": 0,
-        "skip_missing_prev_assignment": 0,
-        "skip_frozen_already": 0,
-        "skip_out_of_horizon": 0,
-        "skip_window_mismatch": 0,
-        "skip_resource_unavailable_pad": 0,
-        "skip_resource_unavailable_launch": 0,
-        "skip_wait_violation": 0,
-        "skip_pair_conflict": 0,
-    }
 
+    # 收集候选锚定信息（通过单 mission 可行性检查后），用于后续配对检查
     _candidates: List[dict] = []
 
     for mission in missions:
         mid = mission.mission_id
         if mid in unlock_mission_ids:
             continue
-        diagnostics["non_unlock_total"] += 1
 
         pad_hold = mission.get_pad_hold_op()
         launch = mission.get_launch_op()
         if not pad_hold or not launch:
-            diagnostics["skip_missing_structure"] += 1
             continue
 
+        # 查询 prev_plan 中的分配
         prev_pad = prev_plan.get_assignment(pad_hold.op_id)
         prev_launch = prev_plan.get_assignment(launch.op_id)
         if not prev_pad or not prev_launch:
-            diagnostics["skip_missing_prev_assignment"] += 1
-            continue
+            continue  # prev 中无分配 → 无法锚定
 
+        # 已被 frozen 的 op 跳过（frozen 约束已施加）
         if pad_hold.op_id in frozen_ops or launch.op_id in frozen_ops:
-            diagnostics["skip_frozen_already"] += 1
             continue
 
-        diagnostics["candidate_checked"] += 1
         old_pad_start = prev_pad.start_slot
         old_launch_start = prev_launch.start_slot
 
+        # 用当前 duration 计算锚定后的 end
         pad_end = old_pad_start + pad_hold.duration
         launch_end = old_launch_start + launch.duration
 
         feasible = True
-        fail_reason = ""
 
+        # Check 1: old starts 必须在 [now, horizon) 范围内
         if old_pad_start < now or old_pad_start >= horizon:
             feasible = False
-            fail_reason = "skip_out_of_horizon"
         elif old_launch_start < now or old_launch_start >= horizon:
             feasible = False
-            fail_reason = "skip_out_of_horizon"
 
+        # Check 2: Launch 必须落在当前 candidate windows 内
         if feasible and launch.time_windows:
             if not _fits_in_window(old_launch_start, launch_end, launch.time_windows):
                 feasible = False
-                fail_reason = "skip_window_mismatch"
 
+        # Check 3: intervals 不得与资源 unavailable 重叠
         if feasible:
             if _interval_overlaps_unavailable(old_pad_start, pad_end, pad_hold.resources):
                 feasible = False
-                fail_reason = "skip_resource_unavailable_pad"
         if feasible:
             if _interval_overlaps_unavailable(old_launch_start, launch_end, launch.resources):
                 feasible = False
-                fail_reason = "skip_resource_unavailable_launch"
 
+        # Check 4: 隐含 wait op 时长可行性
         if feasible:
             wait = mission.get_wait_op()
             if wait:
-                implied_wait_dur = old_launch_start - pad_end
+                implied_wait_dur = old_launch_start - pad_end  # = Launch_start - PadHold_end
                 min_wait_dur = max(0, wait.duration)
                 max_wait_dur = min_wait_dur + op5_max_wait_slots
                 if implied_wait_dur < min_wait_dur or implied_wait_dur > max_wait_dur:
                     feasible = False
-                    fail_reason = "skip_wait_violation"
 
         if feasible:
-            diagnostics["candidate_pass_basic"] += 1
             _candidates.append({
                 'mission_id': mid,
                 'pad_hold_op': pad_hold,
@@ -990,16 +994,18 @@ def _check_anchor_feasibility(
                 'launch_end': launch_end,
             })
         else:
-            if fail_reason:
-                diagnostics[fail_reason] += 1
             skipped += 1
 
-    _frozen_intervals: Dict[str, List[Tuple[int, int]]] = {}
-    for _fop_id, fop in frozen_ops.items():
+    # Check 5 (新增): 配对资源排他性检查
+    # 确保同一资源上的锚定区间不重叠（否则硬约束会导致 INFEASIBLE）。
+    # 同时检查与已有 frozen_ops 的资源冲突。
+    _frozen_intervals: Dict[str, List[Tuple[int, int]]] = {}  # resource_id -> [(start, end), ...]
+    for fop_id, fop in frozen_ops.items():
         for rid in fop.resources:
             _frozen_intervals.setdefault(rid, []).append((fop.start_slot, fop.end_slot))
 
     _accepted: List[dict] = []
+    # 用于追踪已接受锚定的资源占用
     _anchor_intervals: Dict[str, List[Tuple[int, int]]] = {}
 
     def _overlaps_any(start: int, end: int, intervals: List[Tuple[int, int]]) -> bool:
@@ -1013,12 +1019,14 @@ def _check_anchor_feasibility(
         ph = cand['pad_hold_op']
         la = cand['launch_op']
 
+        # 检查 pad_hold 资源冲突
         for rid in ph.resources:
             existing = _frozen_intervals.get(rid, []) + _anchor_intervals.get(rid, [])
             if _overlaps_any(cand['pad_start'], cand['pad_end'], existing):
                 conflict = True
                 break
 
+        # 检查 launch 资源冲突
         if not conflict:
             for rid in la.resources:
                 existing = _frozen_intervals.get(rid, []) + _anchor_intervals.get(rid, [])
@@ -1027,10 +1035,10 @@ def _check_anchor_feasibility(
                     break
 
         if conflict:
-            diagnostics["skip_pair_conflict"] += 1
             skipped += 1
         else:
             _accepted.append(cand)
+            # 记录占用区间
             for rid in ph.resources:
                 _anchor_intervals.setdefault(rid, []).append((cand['pad_start'], cand['pad_end']))
             for rid in la.resources:
@@ -1041,9 +1049,7 @@ def _check_anchor_feasibility(
         anchor_fixes[cand['launch_op'].op_id] = cand['launch_start']
         anchored_missions.append(cand['mission_id'])
 
-    diagnostics["anchored"] = len(anchored_missions)
-    diagnostics["skipped_total"] = skipped
-    return anchor_fixes, skipped, anchored_missions, diagnostics
+    return anchor_fixes, skipped, anchored_missions
 
 
 def solve_v2_1(
@@ -1066,33 +1072,17 @@ def solve_v2_1(
     anchor_skipped = 0
     anchor_missions: List[str] = []
     anchor_skip_reason = ""
-    anchor_diagnostics: Dict[str, int] = {}
     if unlock_mission_ids is not None and prev_plan is not None:
-        anchor_fixes, anchor_skipped, anchor_missions, anchor_diagnostics = _check_anchor_feasibility(
+        anchor_fixes, anchor_skipped, anchor_missions = _check_anchor_feasibility(
             missions, resources, prev_plan, unlock_mission_ids,
             frozen_ops, now, horizon, config.op5_max_wait_slots,
         )
-        if not anchor_fixes:
-            non_unlock_total = anchor_diagnostics.get("non_unlock_total", 0)
-            checked = anchor_diagnostics.get("candidate_checked", 0)
-            missing_prev = anchor_diagnostics.get("skip_missing_prev_assignment", 0)
-            frozen_already = anchor_diagnostics.get("skip_frozen_already", 0)
-            if non_unlock_total <= 0:
-                anchor_skip_reason = "unlock_covers_all"
-            elif checked <= 0 and missing_prev > 0:
-                anchor_skip_reason = "missing_prev_assignment"
-            elif checked <= 0 and frozen_already > 0:
-                anchor_skip_reason = "all_frozen_or_started"
-            elif anchor_skipped > 0:
-                anchor_skip_reason = "all_infeasible"
-            else:
-                anchor_skip_reason = "no_anchor_candidates"
+        if not anchor_fixes and anchor_skipped > 0:
+            anchor_skip_reason = "all_infeasible"
     elif unlock_mission_ids is None:
         anchor_skip_reason = "unlock_all"
-        anchor_diagnostics = {"mode_unlock_all": 1}
     elif prev_plan is None:
         anchor_skip_reason = "no_prev_plan"
-        anchor_diagnostics = {"mode_no_prev_plan": 1}
 
     start_time = time.time()
     if config.use_two_stage:
@@ -1112,7 +1102,6 @@ def solve_v2_1(
     result.anchor_fix_applied_missions = anchor_missions
     result.anchor_fix_applied_vars = dict(anchor_fixes)
     result.anchor_fix_skip_reason = anchor_skip_reason
-    result.anchor_fix_diagnostics = dict(anchor_diagnostics)
     return result
 
 
@@ -1829,4 +1818,3 @@ if __name__ == "__main__":
         for a in result.plan.assignments:
             print(f"  {a.task_id}: pad={a.pad_id}, launch={a.launch_slot}, "
                   f"start={a.start_slot}")
-

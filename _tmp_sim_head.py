@@ -1,4 +1,4 @@
-"""
+﻿"""
 仿真器模块 - Rolling Horizon 仿真主循环
 """
 
@@ -676,7 +676,6 @@ def _fallback_on_infeasible(
     solver_horizon: int,
     frozen_ops: Dict[str, OpAssignment],
     scenario: Any,
-    unlock_mission_ids: Optional[Set[str]] = None,
     verbose: bool = False,
 ) -> SolverResult:
     """
@@ -802,49 +801,6 @@ def _fallback_on_infeasible(
         for assign in old_plan.op_assignments:
             if assign.op_id in state.started_ops and assign.op_id not in state.completed_ops:
                 minimal_frozen[assign.op_id] = assign
-
-    # Level 2a: 局部放松（保留 prev_plan 参考 + 仅局部 unlock）
-    mission_id_set = {m.mission_id for m in missions_to_schedule}
-    local_unlock_ids: Set[str] = set()
-    if unlock_mission_ids:
-        local_unlock_ids.update(mid for mid in unlock_mission_ids if mid in mission_id_set)
-    if new_missions:
-        local_unlock_ids.update(m.mission_id for m in new_missions if m.mission_id in mission_id_set)
-
-    if old_plan is not None and local_unlock_ids:
-        if verbose:
-            print(
-                f"   [Fallback L2a] Local relaxed-anchor solve "
-                f"for {len(local_unlock_ids)} unlock missions"
-            )
-        local_relaxed_result = solve_v2_1(
-            missions=missions_to_schedule,
-            resources=state.resources,
-            horizon=solver_horizon,
-            prev_plan=old_plan,
-            frozen_ops=minimal_frozen,
-            config=relaxed_config,
-            unlock_mission_ids=set(local_unlock_ids),
-            now=now,
-        )
-        if (
-            local_relaxed_result.status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
-            and local_relaxed_result.plan is not None
-        ):
-            local_relaxed_plan: PlanV2_1 = local_relaxed_result.plan  # type: ignore[assignment]
-            merged_local = _inject_preserved_assignments(local_relaxed_plan, preserved_assignments)
-            if verbose:
-                print(f"   [Fallback L2a] SUCCESS — {len(merged_local.op_assignments)} ops")
-            return SolverResult(
-                status=local_relaxed_result.status,
-                plan=merged_local,
-                objective_value=local_relaxed_result.objective_value,
-                solve_time_ms=local_relaxed_result.solve_time_ms,
-                degradation_count=2,
-                degradation_actions=["incremental_solve_failed", "local_relaxed_anchor"],
-            )
-        elif verbose:
-            print(f"   [Fallback L2a] FAILED — {local_relaxed_result.status}")
 
     relaxed_result = solve_v2_1(
         missions=missions_to_schedule,
@@ -1077,20 +1033,6 @@ def _simulate_episode_v2_1(
                     if mission and mission not in missions_to_schedule:
                         missions_to_schedule.append(mission)
 
-        # Keep unfinished missions from previous plan in solver scope.
-        # Otherwise they can drop out when release > horizon_end, and
-        # anchor fix-and-optimize cannot act on them.
-        if state.current_plan:
-            prev_unfinished_ids = {
-                assign.mission_id
-                for assign in state.current_plan.op_assignments
-                if assign.op_id not in state.completed_ops and assign.end_slot > now
-            }
-            for mid in sorted(prev_unfinished_ids):
-                mission = state.get_mission(mid)
-                if mission and not state.is_mission_completed(mission) and mission not in missions_to_schedule:
-                    missions_to_schedule.append(mission)
-
         frozen_ops = compute_frozen_ops(
             state.current_plan,
             now,
@@ -1108,13 +1050,7 @@ def _simulate_episode_v2_1(
             )
             # direct_plan 时也回写日志（无 solver 调用）
             if hasattr(policy, 'update_pending_log_with_solver_result'):
-                try:
-                    policy.update_pending_log_with_solver_result(
-                        solver_result=result,
-                        final_meta_params=meta_params,
-                    )
-                except TypeError:
-                    policy.update_pending_log_with_solver_result(solver_result=result)
+                policy.update_pending_log_with_solver_result(solver_result=result)
         else:
             _trcg_chain_result = None  # FallbackChainResult，用于回写日志
             solver_config = SolverConfigV2_1(
@@ -1166,132 +1102,60 @@ def _simulate_episode_v2_1(
                 now=now,
             )
 
-            # ---- TRCG Dual-Candidate Selector ----
-            # Compare anchor/local-unlock candidate with free candidate under delay cap.
+            # ---- TRCG Anchor Quality Guard ----
+            # 当 anchor 求解的 drift 极端异常时才回退，大幅提高阈值以保留锚点效果。
+            # 软锚点（weight=500）已经在 solver 内部平衡了 drift vs anchor 约束，
+            # 不需要外部 guard 频繁干预。
+            _ANCHOR_DRIFT_GUARD_THRESHOLD = 2000.0  # 大幅提高阈值，仅在极端情况触发
             if (unlock_set is not None
                     and result.status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
-                    and state.current_plan is not None
-                    and (not meta_params or meta_params.decision_source != "skip_no_conflict")):
-                _result_free = solve_v2_1(
-                    missions=missions_to_schedule,
-                    resources=state.resources,
-                    horizon=solver_horizon,
-                    prev_plan=state.current_plan,
-                    frozen_ops=frozen_ops,
-                    config=solver_config,
-                    unlock_mission_ids=None,
-                    now=now,
+                    and result.anchor_fix_applied_count > 0
+                    and state.current_plan is not None):
+                _guard_drift_anchor, *_ = compute_plan_drift_ops(
+                    state.current_plan, result.plan,
+                    state.completed_ops, state.started_ops,
+                    set(frozen_ops.keys()),
+                    state.missions,
+                    kappa_win=kappa_win, kappa_seq=kappa_seq,
                 )
-                if _result_free.status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE):
-                    _drift_anchor, *_ = compute_plan_drift_ops(
-                        state.current_plan, result.plan,
-                        state.completed_ops, state.started_ops,
-                        set(frozen_ops.keys()),
-                        state.missions,
-                        kappa_win=kappa_win, kappa_seq=kappa_seq,
+                if _guard_drift_anchor > _ANCHOR_DRIFT_GUARD_THRESHOLD:
+                    _result_free = solve_v2_1(
+                        missions=missions_to_schedule,
+                        resources=state.resources,
+                        horizon=solver_horizon,
+                        prev_plan=state.current_plan,
+                        frozen_ops=frozen_ops,
+                        config=solver_config,
+                        unlock_mission_ids=None,
+                        now=now,
                     )
-                    _drift_free, *_ = compute_plan_drift_ops(
-                        state.current_plan, _result_free.plan,
-                        state.completed_ops, state.started_ops,
-                        set(frozen_ops.keys()),
-                        state.missions,
-                        kappa_win=kappa_win, kappa_seq=kappa_seq,
-                    )
-
-                    def _delay_metrics_for_plan(_plan: PlanV2_1) -> Tuple[float, float]:
-                        _weighted = 0.0
-                        _sum_delay = 0.0
-                        _count = 0
-                        for _m in missions_to_schedule:
-                            _launch = _m.get_launch_op()
-                            if not _launch:
-                                continue
-                            _assign = _plan.get_assignment(_launch.op_id)
-                            if not _assign:
-                                continue
-                            _d = max(0.0, float(_assign.start_slot - _m.due))
-                            _weighted += float(_m.priority) * _d
-                            _sum_delay += _d
-                            _count += 1
-                        _avg = (_sum_delay / _count) if _count > 0 else 0.0
-                        return _weighted, _avg
-
-                    _delay_anchor_w, _delay_anchor_avg = _delay_metrics_for_plan(result.plan)
-                    _delay_free_w, _delay_free_avg = _delay_metrics_for_plan(_result_free.plan)
-                    _delay_cap_ratio = 1.12
-                    _decision_source = (meta_params.decision_source or "") if meta_params else ""
-                    if _decision_source.startswith("heuristic_fallback"):
-                        _delay_cap_ratio = 1.08
-                    elif _decision_source.startswith("skip_stable_state"):
-                        _delay_cap_ratio = 1.10
-                    _delay_cap_w = _delay_free_w * _delay_cap_ratio
-                    _delay_cap_avg = _delay_free_avg * _delay_cap_ratio
-                    if _delay_free_avg <= 1e-6:
-                        _delay_cap_avg = 1.0
-
-                    # Effective-anchor gate: allow anchor candidate when it is truly
-                    # effective or when it gives clear drift gain under delay cap.
-                    _diag = getattr(result, "anchor_fix_diagnostics", {}) or {}
-                    _anchor_checked = int(_diag.get("candidate_checked", 0))
-                    _anchor_non_unlock = int(_diag.get("non_unlock_total", 0))
-                    _anchor_applied = int(getattr(result, "anchor_fix_applied_count", 0))
-                    _anchor_ratio = 0.0
-                    _anchor_effective = False
-                    if _anchor_checked > 0:
-                        _anchor_ratio = _anchor_applied / float(_anchor_checked)
-                        _min_anchor_ratio = 0.10
-                        if _decision_source.startswith("heuristic_fallback"):
-                            _min_anchor_ratio = 0.15
-                        elif _decision_source.startswith("skip_stable_state"):
-                            _min_anchor_ratio = 0.15
-                        _anchor_effective = (
-                            _anchor_applied >= 1
-                            and (_anchor_ratio >= _min_anchor_ratio or _anchor_applied >= 2)
+                    if _result_free.status in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE):
+                        _guard_drift_free, *_ = compute_plan_drift_ops(
+                            state.current_plan, _result_free.plan,
+                            state.completed_ops, state.started_ops,
+                            set(frozen_ops.keys()),
+                            state.missions,
+                            kappa_win=kappa_win, kappa_seq=kappa_seq,
                         )
-                    elif _anchor_non_unlock <= 0:
-                        _anchor_effective = False
-                    else:
-                        _anchor_effective = False
-
-                    _anchor_delay_ok = (
-                        _delay_anchor_w <= _delay_cap_w and _delay_anchor_avg <= _delay_cap_avg
-                    )
-                    _drift_gain = max(0.0, _drift_free - _drift_anchor)
-                    _drift_gain_ratio = _drift_gain / max(1.0, float(_drift_free))
-                    _anchor_gain_override = (_anchor_applied >= 1 and _drift_gain_ratio >= 0.015)
-
-                    _anchor_llm_soft_keep = (
-                        _decision_source.startswith("llm")
-                        and _drift_anchor <= _drift_free
-                    )
-                    _candidates = [("free", _result_free, _drift_free, _delay_free_w)]
-                    if _anchor_delay_ok and (_anchor_effective or _anchor_gain_override or _anchor_llm_soft_keep):
-                        _candidates.append(("anchor", result, _drift_anchor, _delay_anchor_w))
-
-                    _best_name, _best_result, _best_drift, _best_delay = min(
-                        _candidates,
-                        key=lambda x: (x[2], x[3]),
-                    )
-                    if _best_name == "free":
-                        result = _best_result
-                        if meta_params:
-                            _suffix = "_select_free"
-                            if not (_anchor_effective or _anchor_gain_override):
-                                _suffix = "_select_free_weak_anchor"
-                            meta_params = dataclasses.replace(
-                                meta_params,
-                                unlock_mission_ids=None,
-                                decision_source=meta_params.decision_source + _suffix,
-                            )
+                        if _guard_drift_free < _guard_drift_anchor:
+                            result = _result_free
+                            if meta_params:
+                                meta_params = dataclasses.replace(
+                                    meta_params,
+                                    unlock_mission_ids=None,
+                                    decision_source=meta_params.decision_source + "_guard_free",
+                                )
 
             # ---- TRCG Repair 回退链：若 policy 提供了 unlock_mission_ids 且初次求解失败 ----
-            # 对 INFEASIBLE 也执行一次 TRCG 回退链，优先尝试局部扩大 unlock /
-            # 放松 freeze，而不是立即退化到通用全局回退。
+            # 注意：仅在 TIMEOUT 时触发 TRCG 回退（换配置可能帮助），
+            # INFEASIBLE 意味着结构性不可行（frozen_ops 冲突等），
+            # TRCG 回退链无法解决 → 直接走通用回退（会移除 frozen_ops）。
             _trcg_chain_result = None  # FallbackChainResult，用于回写日志
             _trcg_should_fallback = (
                 meta_params
                 and meta_params.unlock_mission_ids is not None
                 and result.status not in (SolveStatus.OPTIMAL, SolveStatus.FEASIBLE)
+                and result.status != SolveStatus.INFEASIBLE  # 结构性不可行直接走通用回退
             )
             if _trcg_should_fallback:
                 result, meta_params, _trcg_chain_result = _solve_with_trcg_fallback(
@@ -1322,24 +1186,16 @@ def _simulate_episode_v2_1(
                     solver_config=solver_config,
                     solver_horizon=solver_horizon,
                     frozen_ops=frozen_ops,
-                    unlock_mission_ids=unlock_set,
                     scenario=scenario,
                     verbose=verbose,
                 )
 
             # ---- 回写 TRCG repair step log（solver 结果填充） ----
             if hasattr(policy, 'update_pending_log_with_solver_result'):
-                try:
-                    policy.update_pending_log_with_solver_result(
-                        solver_result=result,
-                        chain_result=_trcg_chain_result,
-                        final_meta_params=meta_params,
-                    )
-                except TypeError:
-                    policy.update_pending_log_with_solver_result(
-                        solver_result=result,
-                        chain_result=_trcg_chain_result,
-                    )
+                policy.update_pending_log_with_solver_result(
+                    solver_result=result,
+                    chain_result=_trcg_chain_result,
+                )
 
         old_plan = state.current_plan
 

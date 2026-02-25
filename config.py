@@ -37,6 +37,8 @@ class Config:
     p_pad_outage: float = 0.01
     outage_duration_range: Tuple[int, int] = (3, 12)
     sigma_duration: float = 0.1
+    p_duration_disturbance: float = 0.05
+    p_release_jitter: float = 0.15
     
     # 求解器
     solver_timeout_s: float = 30.0
@@ -84,7 +86,7 @@ class Config:
     
     # Range closure 扰动
     max_resample_attempts_for_closure: int = 10
-    range_closure_duration_range: Tuple[int, int] = (6, 18)  # slots
+    range_closure_duration_range: Tuple[int, int] = (3, 10)  # slots
     
     # 扰动概率（weather 触发 range_closure）
     p_weather_light: float = 0.05
@@ -107,22 +109,28 @@ MISSIONS_BY_DIFFICULTY: Dict[str, int] = {
 
 DIFFICULTY_DISTURBANCE: Dict[str, Dict[str, float]] = {
     "light": {
-        "p_weather": 0.05,
-        "p_pad_outage": 0.02,
+        "p_weather": 0.04,
+        "p_pad_outage": 0.01,
         "sigma_duration": 0.12,
-        "release_jitter_slots": 2,
+        "release_jitter_slots": 1,
+        "p_duration_disturbance": 0.06,
+        "p_release_jitter": 0.10,
     },
     "medium": {
-        "p_weather": 0.07,
-        "p_pad_outage": 0.03,
-        "sigma_duration": 0.2,
-        "release_jitter_slots": 3,
+        "p_weather": 0.06,
+        "p_pad_outage": 0.015,
+        "sigma_duration": 0.18,
+        "release_jitter_slots": 2,
+        "p_duration_disturbance": 0.08,
+        "p_release_jitter": 0.12,
     },
     "heavy": {
-        "p_weather": 0.10,
-        "p_pad_outage": 0.05,
-        "sigma_duration": 0.3,
-        "release_jitter_slots": 5,
+        "p_weather": 0.08,
+        "p_pad_outage": 0.02,
+        "sigma_duration": 0.26,
+        "release_jitter_slots": 2,
+        "p_duration_disturbance": 0.10,
+        "p_release_jitter": 0.14,
     },
 }
 
@@ -156,6 +164,8 @@ def make_config_for_difficulty(difficulty: str, num_missions_override: Optional[
         p_pad_outage=dist["p_pad_outage"],
         sigma_duration=dist["sigma_duration"],
         release_jitter_slots=int(dist.get("release_jitter_slots", 0)),
+        p_duration_disturbance=float(dist.get("p_duration_disturbance", 0.05)),
+        p_release_jitter=float(dist.get("p_release_jitter", 0.15)),
     )
     base.update(kwargs)
     return Config(**base)

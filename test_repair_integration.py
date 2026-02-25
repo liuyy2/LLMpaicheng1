@@ -1,4 +1,4 @@
-"""
+﻿"""
 3 个关键集成测试（子 Prompt 6 交付物）
 
 Case 1: range_closure 清空旧窗口 → Op6 anchor 必须自动跳过
@@ -92,7 +92,7 @@ missions_c1 = [m1_shifted, m2_keep, m3_keep]
 
 # anchor check: unlock only M003 → M001 & M002 should be anchored
 # but M001's Op6 window moved → anchor infeasible → skip
-anchor_fixes, skipped, anchored_ids = _check_anchor_feasibility(
+anchor_fixes, skipped, anchored_ids, _diag_c1 = _check_anchor_feasibility(
     missions_c1, resources_clean, prev_plan,
     unlock_mission_ids={"M003"},
     frozen_ops={}, now=0, horizon=200, op5_max_wait_slots=144,
@@ -101,6 +101,7 @@ anchor_fixes, skipped, anchored_ids = _check_anchor_feasibility(
 assert "M001_Op6" not in anchor_fixes, \
     f"Case1 FAIL: M001_Op6 should be skipped (window moved), but in anchor_fixes"
 assert skipped >= 1, f"Case1 FAIL: expected >=1 skipped, got {skipped}"
+assert _diag_c1.get("skip_window_mismatch", 0) >= 1
 print(f"  anchor_fixes keys: {list(anchor_fixes.keys())}")
 print(f"  skipped: {skipped}")
 
@@ -133,6 +134,7 @@ log_c1 = build_repair_step_log(
 )
 assert log_c1.anchor_fix_skipped >= 1, \
     f"Case1 log: expected anchor_fix_skipped >=1, got {log_c1.anchor_fix_skipped}"
+assert isinstance(getattr(log_c1, "anchor_fix_diagnostics", {}), dict)
 print(f"  log.anchor_fix_skipped={log_c1.anchor_fix_skipped}, "
       f"solver_status={log_c1.solver_status}")
 print("  Case 1 PASS")
@@ -153,7 +155,7 @@ resources_outage = make_resources(pad_unavail=[(outage_start, outage_end)])
 
 # anchor check: unlock M001 → M002 & M003 need anchor
 # M002's Op4 overlaps outage → skip
-anchor_fixes_c2, skipped_c2, anchored_ids_c2 = _check_anchor_feasibility(
+anchor_fixes_c2, skipped_c2, anchored_ids_c2, _diag_c2 = _check_anchor_feasibility(
     missions_base, resources_outage, prev_plan,
     unlock_mission_ids={"M001"},
     frozen_ops={}, now=0, horizon=200, op5_max_wait_slots=144,
@@ -162,6 +164,7 @@ anchor_fixes_c2, skipped_c2, anchored_ids_c2 = _check_anchor_feasibility(
 assert "M002_Op4" not in anchor_fixes_c2, \
     f"Case2 FAIL: M002_Op4 should be skipped (pad outage)"
 assert skipped_c2 >= 1
+assert _diag_c2.get("skip_resource_unavailable_pad", 0) >= 1
 print(f"  anchor_fixes keys: {list(anchor_fixes_c2.keys())}")
 print(f"  skipped: {skipped_c2}")
 

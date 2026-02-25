@@ -539,7 +539,7 @@ def generate_disturbance_timeline_v2_1(
 
     # Duration 扰动（只对 Op1-Op3）
     for mission in missions:
-        if rng.random() < 0.05:
+        if rng.random() < float(getattr(config, "p_duration_disturbance", 0.05)):
             candidates = [op for op in mission.operations if op.op_index in (1, 2, 3)]
             if candidates:
                 op = rng.choice(candidates)
@@ -555,8 +555,8 @@ def generate_disturbance_timeline_v2_1(
     jitter_max = getattr(config, 'release_jitter_slots', 0)
     if jitter_max > 0:
         for mission in missions:
-            # 约 15% 的任务受影响，概率适中不会严重影响完成率
-            if rng.random() < 0.15:
+            # Keep jitter as a moderate local disturbance; configurable by difficulty.
+            if rng.random() < float(getattr(config, "p_release_jitter", 0.15)):
                 jitter = rng.randint(1, jitter_max)
                 events.append(DisturbanceEvent(
                     event_type="release_jitter",

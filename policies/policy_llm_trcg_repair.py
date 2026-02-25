@@ -447,12 +447,11 @@ class TRCGRepairPolicy(BasePolicy):
         # 从 TRCG 冲突邻居和 urgent missions 中补充，使 unlock 集合至少包含 3 个 mission，
         # 给 solver 更多优化空间。cap 到 active 的 50% 以保留 anchor 引导效果。
         # 降低 unlock 上限：更少 mission 被解锁 → 更多被锚定 → 更低 drift
-        _MIN_UNLOCK = 3
-        _MAX_UNLOCK_RATIO = 0.25  # 最多解锁 25% active mission
-        _max_unlock = max(_MIN_UNLOCK, int(len(active_mission_ids) * _MAX_UNLOCK_RATIO))
         _unlock_set = set(_valid_unlock)
         _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
-        _target_unlock = min(len(_eligible), _MIN_UNLOCK)
+        _target_unlock, _max_unlock = self._compute_unlock_budget(
+            trcg_dict, len(_eligible)
+        )
 
         # 即使 LLM 只给了 1 个 root，也要补齐局部邻域，避免单点解锁退化为“尾部追加”。
         if len(_unlock_set) < _target_unlock:
@@ -473,7 +472,7 @@ class TRCGRepairPolicy(BasePolicy):
                 if len(_unlock_set) >= _target_unlock:
                     break
 
-        _valid_unlock = list(_unlock_set)
+        _valid_unlock = sorted(_unlock_set)
 
         # 如果过滤后 unlock 为空，使用空元组（= 全部锚定）而非 None（= 全解锁）
         # 这是关键改动：即使 LLM 没有选出需要解锁的 mission，
@@ -661,7 +660,7 @@ class TRCGRepairPolicy(BasePolicy):
     # ------------------------------------------------------------------
 
     # 跳过阈值常量（放宽以提高跳过率，实际场景 urgent 通常≥3，压力≥0.8）
-    _SKIP_PRESSURE_THRESH = 0.85  # bottleneck 压力低于此值视为"宽松"
+    _SKIP_PRESSURE_THRESH = 0.80  # bottleneck 压力低于此值视为"宽松"
     _SKIP_MAX_URGENT = 2          # urgent mission ≤ 此值时可跳过
 
     def _check_skip_conditions(self, trcg_dict: Dict[str, Any]) -> bool:
@@ -693,6 +692,41 @@ class TRCGRepairPolicy(BasePolicy):
 
         return True
 
+    @staticmethod
+    def _compute_unlock_budget(
+        trcg_dict: Dict[str, Any],
+        eligible_count: int,
+    ) -> Tuple[int, int]:
+        """
+        Dynamic unlock budget: increase local search space in high-pressure/near-queue states
+        while still keeping a meaningful anchor set.
+        """
+        if eligible_count <= 0:
+            return 0, 0
+
+        conflicts = trcg_dict.get('top_conflicts', []) or []
+        urgents = trcg_dict.get('urgent_missions', []) or []
+        pressure = trcg_dict.get('bottleneck_pressure', {}) or {}
+        max_pressure = max(pressure.values(), default=0.0) if pressure else 0.0
+        near_queue_n = sum(1 for c in conflicts if c.get('conflict_type') == 'near_queue')
+
+        target_unlock = 3
+        if max_pressure >= 0.90 or near_queue_n >= 6:
+            target_unlock = 5
+        elif max_pressure >= 0.80 or near_queue_n >= 4 or len(urgents) >= 3:
+            target_unlock = 4
+
+        max_ratio = 0.25
+        if max_pressure >= 0.85:
+            max_ratio = 0.35
+        elif max_pressure >= 0.75:
+            max_ratio = 0.30
+
+        max_unlock = max(target_unlock, int(eligible_count * max_ratio))
+        max_unlock = min(max_unlock, eligible_count)
+        target_unlock = min(target_unlock, eligible_count)
+        return target_unlock, max_unlock
+
     def _build_skip_return(
         self,
         now: int,
@@ -709,10 +743,25 @@ class TRCGRepairPolicy(BasePolicy):
         """
         self._skip_count += 1
 
-        # freeze_horizon=96 slots (24h)，匹配 FT best_params
-        freeze_h_slots = max(96, config.freeze_horizon)
-        # 使用标准 epsilon（selective freezing 已保证低 drift，无需放宽）
-        epsilon_solver = max(0.10, config.default_epsilon_solver)
+        # 无冲突时仍给少量可动空间，避免因过度冻结导致 delay 积累。
+        freeze_h_slots = max(60, config.freeze_horizon)
+        epsilon_solver = min(0.08, max(0.0, config.default_epsilon_solver))
+
+        urgent_ids: List[str] = []
+        for u in sorted(
+            trcg_dict.get('urgent_missions', []),
+            key=lambda x: float(x.get('urgency_score', 9999.0)),
+        ):
+            mid = u.get('mission_id', '')
+            if isinstance(mid, str) and mid and mid not in urgent_ids:
+                urgent_ids.append(mid)
+        _max_pressure = max(trcg_dict.get('bottleneck_pressure', {}).values(), default=0.0)
+        max_unlock = 1
+        if len(urgent_ids) >= 2 and _max_pressure >= 0.50:
+            max_unlock = 2
+        if len(urgent_ids) >= 3 and _max_pressure >= 0.70:
+            max_unlock = 3
+        use_unlock = tuple(urgent_ids[:max_unlock])
 
         meta = MetaParams(
             w_delay=self._w_delay,
@@ -723,9 +772,8 @@ class TRCGRepairPolicy(BasePolicy):
             epsilon_solver=epsilon_solver,
             kappa_win=config.default_kappa_win,
             kappa_seq=config.default_kappa_seq,
-            # 核心改动：全部锚定！无冲突时保持所有 mission 原位
-            # 空元组 = 无 mission 被 unlock = 全部 mission 施加软锚点约束
-            unlock_mission_ids=(),
+            # 无冲突但允许 1~2 个高紧急任务微调，抑制 delay 尾部风险。
+            unlock_mission_ids=use_unlock,
             root_cause_mission_id=None,
             secondary_root_cause_mission_id=None,
             decision_source="skip_no_conflict",
@@ -836,12 +884,11 @@ class TRCGRepairPolicy(BasePolicy):
         ]
 
         # ---- 扩展 unlock 集合（与 Step 6 逻辑一致：更严格的上限）----
-        _MIN_UNLOCK = 3
-        _MAX_UNLOCK_RATIO = 0.25
-        _max_unlock = max(_MIN_UNLOCK, int(len(active_mission_ids) * _MAX_UNLOCK_RATIO))
         _unlock_set = set(valid_unlock)
         _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
-        _target_unlock = min(len(_eligible), _MIN_UNLOCK)
+        _target_unlock, _max_unlock = self._compute_unlock_budget(
+            trcg_dict, len(_eligible)
+        )
 
         if len(_unlock_set) < _target_unlock:
             conflicts = trcg_dict.get('top_conflicts', [])
@@ -861,7 +908,7 @@ class TRCGRepairPolicy(BasePolicy):
                 if len(_unlock_set) >= _target_unlock:
                     break
 
-        valid_unlock = list(_unlock_set)
+        valid_unlock = sorted(_unlock_set)
 
         # 复用上次 LLM 的 root_cause 信息
         if not valid_unlock:
@@ -962,6 +1009,7 @@ class TRCGRepairPolicy(BasePolicy):
         self,
         solver_result=None,
         chain_result: Optional[FallbackChainResult] = None,
+        final_meta_params: Optional[MetaParams] = None,
     ) -> None:
         """
         将 solver 求解结果回写到本步的 repair_step 日志并落盘。
@@ -974,6 +1022,7 @@ class TRCGRepairPolicy(BasePolicy):
         ----------
         solver_result : SolverResult — 直接求解结果（无回退链时）
         chain_result : FallbackChainResult — 回退链结果（有回退链时）
+        final_meta_params : MetaParams — 最终实际采用的参数（用于修正日志 decision_source/unlock）
         """
         log = self._pending_step_log
         if log is None:
@@ -993,6 +1042,7 @@ class TRCGRepairPolicy(BasePolicy):
                 log.anchor_fix_applied_missions = getattr(sr, 'anchor_fix_applied_missions', [])
                 log.anchor_fix_applied_vars = getattr(sr, 'anchor_fix_applied_vars', {})
                 log.anchor_fix_skip_reason = getattr(sr, 'anchor_fix_skip_reason', '')
+                log.anchor_fix_diagnostics = getattr(sr, 'anchor_fix_diagnostics', {})
         elif solver_result is not None:
             log.total_solver_calls = 1
             log.final_attempt_name = "initial"
@@ -1003,6 +1053,33 @@ class TRCGRepairPolicy(BasePolicy):
             log.anchor_fix_applied_missions = getattr(solver_result, 'anchor_fix_applied_missions', [])
             log.anchor_fix_applied_vars = getattr(solver_result, 'anchor_fix_applied_vars', {})
             log.anchor_fix_skip_reason = getattr(solver_result, 'anchor_fix_skip_reason', '')
+            log.anchor_fix_diagnostics = getattr(solver_result, 'anchor_fix_diagnostics', {})
+
+        _solver_obj = chain_result.solver_result if chain_result is not None else solver_result
+        if _solver_obj is not None:
+            _degradation_count = int(getattr(_solver_obj, 'degradation_count', 0) or 0)
+            _degradation_actions = getattr(_solver_obj, 'degradation_actions', []) or []
+            if _degradation_count > 0:
+                _diag = dict(log.anchor_fix_diagnostics or {})
+                _diag['fallback_degradation_count'] = _degradation_count
+                _diag['fallback_action_count'] = len(_degradation_actions)
+                log.anchor_fix_diagnostics = _diag
+                if log.anchor_fix_applied == 0 and not log.anchor_fix_skip_reason:
+                    log.anchor_fix_skip_reason = "fallback_degradation"
+
+        # 覆盖为最终实际采用的 meta（例如 dual-candidate 选了 free）
+        if final_meta_params is not None:
+            if getattr(final_meta_params, "decision_source", None):
+                log.decision_source = final_meta_params.decision_source
+            if log.decision_json:
+                if final_meta_params.unlock_mission_ids is not None:
+                    log.decision_json["unlock_mission_ids"] = list(final_meta_params.unlock_mission_ids)
+                if final_meta_params.root_cause_mission_id is not None:
+                    log.decision_json["root_cause_mission_id"] = final_meta_params.root_cause_mission_id
+                if final_meta_params.secondary_root_cause_mission_id is not None:
+                    log.decision_json["secondary_root_cause_mission_id"] = (
+                        final_meta_params.secondary_root_cause_mission_id
+                    )
 
         # 落盘
         if self._enable_logging and self._log_dir and self._pending_now is not None:

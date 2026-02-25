@@ -1964,6 +1964,10 @@ def main():
         "--llm-top-p", type=float, default=1.0,
         help="LLM top_p 参数 (default: 1.0)"
     )
+    parser.add_argument(
+        "--llm-max-workers", type=int, default=8,
+        help="trcg_repair_llm LLM episode parallelism (default: 8)"
+    )
     
     args = parser.parse_args()
     
@@ -2009,7 +2013,8 @@ def main():
         llm_timeout_s=args.llm_timeout_s,
         llm_max_retries=args.llm_max_retries,
         llm_temperature=args.llm_temperature,
-        llm_top_p=args.llm_top_p
+        llm_top_p=args.llm_top_p,
+        llm_max_workers=max(1, args.llm_max_workers)
     )
     
     # -- num_missions 覆盖 (全局, 需要 monkey-patch 到 wrapper) --
