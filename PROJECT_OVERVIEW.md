@@ -1125,3 +1125,375 @@ $$
 
 ---
 
+## 5. 完整约束体系（Constraint Taxonomy）
+
+本节系统汇总项目在 CP-SAT 模型（`solver_cpsat.py`）及仿真层（`simulator.py`）中涉及的**所有约束**，按类别分层展示实际代码实现与数学形式。
+
+---
+
+### 5.1 硬约束（Hard Constraints）
+
+硬约束在 CP-SAT 模型中以 `model.Add(...)` 或内置传播形式施加，**不可违反**，违反则为 INFEASIBLE。
+
+#### C1 释放时间约束（Release Time Constraint）
+
+**适用范围**：全部工序（Op1–Op6 + Op3b）
+
+```python
+# solver 变量定义时直接编码下界
+start_vars[op.op_id] = model.NewIntVar(op.release, horizon, f"start_{op.op_id}")
+```
+
+$$
+s_{m,i} \geq r_{m,i}, \quad \forall m \in M,\ i \in \{1,\ldots,7\}
+$$
+
+其中 $r_{m,i}$ 为工序 $(m,i)$ 的最早可开始时间，继承自任务释放时间与前序工序累计完工时间的最大值。
+
+---
+
+#### C2 工序时长约束（Duration Constraint）
+
+**适用范围**：全部工序（除 Op5 外均为固定时长）
+
+```python
+end_vars[op.op_id] = model.NewIntVar(...)
+model.Add(end_vars[op.op_id] == start_vars[op.op_id] + op.duration)
+```
+
+$$
+e_{m,i} = s_{m,i} + \text{dur}_{m,i}, \quad \forall m,i \text{ (非 Op5)}
+$$
+
+---
+
+#### C3 前序约束（Precedence Constraint）
+
+**适用范围**：工序链 Op1→Op2→Op3→Op3b→Op4→Op5→Op6（通过 `Operation.precedences` 字段载入）
+
+```python
+for op in all_ops:
+    for pred_id in op.precedences:
+        if pred_id in end_vars:
+            model.Add(start_vars[op.op_id] >= end_vars[pred_id])
+```
+
+$$
+s_{m,i} \geq e_{m,i-1}, \quad \forall m \in M,\ i \geq 2
+$$
+
+> **注意**：Op3b 以 `precedences` 字段自动嵌入链，无需手工区分索引。前序链顺序为：Op1→Op2→Op3→Op3b→Op4→Op5→Op6。
+
+---
+
+#### C4 Pad 块三元组连续性约束（Contiguous Pad Block Constraint）⚠️ **新**
+
+**适用范围**：每任务的 (Op4, Op5, Op6) 三元组
+
+这是一项**文档中此前未明确说明的隐式关键约束**。Op4（pad_hold）、Op5（wait）、Op6（launch）三个工序在 Pad 资源上必须**紧接连续执行，无任何间隙**：
+
+```python
+# Pad block contiguity: pad_hold -> wait -> launch must be contiguous
+for mission in missions:
+    pad_hold, wait, launch = mission.get_pad_block()
+    model.Add(start_vars[wait.op_id] == end_vars[pad_hold.op_id])   # Op5紧跟Op4
+    model.Add(start_vars[launch.op_id] == end_vars[wait.op_id])      # Op6紧跟Op5
+```
+
+$$
+s_{m,5} = e_{m,4}, \quad s_{m,6} = e_{m,5}, \quad \forall m \in M
+$$
+
+**工程含义**：一旦火箭上塔（Op4 开始），Pad 就被连续占用直至发射（Op6 结束），中间不允许释放再占用。这是"一旦上塔即锁定"的现实运营规则。
+
+---
+
+#### C5 Op5 可变时长约束（Variable-Duration Wait Constraint）⚠️ **新**
+
+**适用范围**：Op5（台面占用 / 等待工序）
+
+Op5 是全系统**唯一具有可变工序时长的工序**。其时长是决策变量，范围由最小标称时长与最大等待窗口共同约束：
+
+```python
+wait_op_ids = {mission.get_wait_op().op_id for mission in missions}
+if op.op_id in wait_op_ids:
+    min_duration = max(0, op.duration)
+    max_duration = min_duration + op5_max_wait_slots        # 默认 op5_max_wait_slots=96(24h)
+    duration_var = model.NewIntVar(min_duration, max_duration, f"dur_{op.op_id}")
+    model.Add(end_vars[op.op_id] == start_vars[op.op_id] + duration_var)
+```
+
+$$
+\text{dur}_{m,5}^{\min} \leq \text{dur}_{m,5} \leq \text{dur}_{m,5}^{\min} + H_{\text{wait}}, \quad H_{\text{wait}} = 96\ \text{slots}\ (24\text{h})
+$$
+
+**关系澄清**：文档此前描述的"Op5→Op6 最大间隔 24h"等价于 $\text{dur}_{m,5} \leq \text{dur}_{m,5}^{\min} + 96$，而非 $s_{m,6} - e_{m,5} \leq 96$（因为 C4 保证了 $s_{m,6} = e_{m,5}$，两者等价）。**可变时长**是 Op5 "弹性等待" 的建模机制，既保证连续性又允许选择不同发射窗口。
+
+---
+
+#### C6 Op6 发射窗口约束（Launch Window Constraint）
+
+**适用范围**：Op6（发射工序）
+
+每个任务必须**恰好选择一个**发射窗口，Op6 的时间范围必须完整落在所选窗口内：
+
+```python
+window_choice = []
+for win_idx, (ws, we) in enumerate(launch.time_windows):
+    in_window = model.NewBoolVar(...)
+    window_choice.append(in_window)
+    model.Add(start_vars[launch.op_id] >= ws).OnlyEnforceIf(in_window)
+    model.Add(end_vars[launch.op_id] <= we).OnlyEnforceIf(in_window)
+model.AddExactlyOne(window_choice)   # ← 恰好一个窗口
+```
+
+$$
+\exists!\ k \in W_m:\ s_{m,6} \geq \text{ws}_{m,k}\ \land\ e_{m,6} \leq \text{we}_{m,k}
+$$
+
+**预处理**：传入 solver 之前，`time_windows` 已经过 Range Calendar 交集过滤（见 C10）。
+
+---
+
+#### C7 资源容量约束（Resource Capacity / No-Overlap Constraint）
+
+**适用范围**：全部资源 R_pad、R1、R2、R3、R4、R_range_test（每种容量均为 1）
+
+```python
+for res_id, intervals in resource_intervals.items():
+    if intervals:
+        model.AddNoOverlap(intervals)   # 容量=1 → NoOverlap
+```
+
+$$
+\forall r \in \mathcal{R},\ \text{interval}_{m,i} \cap \text{interval}_{m',i'} = \emptyset,\ \text{若}\ r \in \text{res}_{m,i} \cap \text{res}_{m',i'}
+$$
+
+**Op3b 多资源同步约束**：Op3b 同时占用 R3 和 R_range_test，其区间变量被分别注册到两个资源的 NoOverlap 集合，从而自动施加双重无冲突约束：
+
+```python
+# Op3b.resources = ["R3", "R_range_test"]
+for res_id in op.resources:  # 遍历 ["R3", "R_range_test"]
+    resource_intervals[res_id].append(interval_vars[op.op_id])
+```
+
+---
+
+#### C8 资源不可用区间约束（Resource Unavailability / Closure Blocker）
+
+**适用范围**：所有资源中标记为 `unavailable` 的区间（Pad Outage、Range Closure 注入的封闭窗口）
+
+通过在 NoOverlap 中插入定长固定区间（"Blocker"）实现：
+
+```python
+for resource in resources:
+    for closure_idx, (cs, ce) in enumerate(resource.unavailable):
+        duration = ce - cs + 1
+        blocker = model.NewFixedSizedIntervalVar(cs, duration, f"closure_...")
+        resource_intervals[resource.resource_id].append(blocker)
+```
+
+$$
+\text{NoOverlap}\big(\{\text{op\_intervals}\} \cup \{\text{unavailability\_blockers}\}\big)
+$$
+
+**Range Closure 注入路径**：
+1. 仿真器检测到 `range_closure` 扰动事件
+2. 对 `range_calendar[day]` 执行区间减法（线段差运算）
+3. 护栏 A/B 确保不清空当天窗口或任意任务的 Op6 候选窗口
+4. 缩短后的 Range 开放区间"外侧"部分转化为 `resource.unavailable` 注入 C8
+
+---
+
+#### C9 冻结约束（Freeze Horizon Constraint）
+
+**适用范围**：已开始工序（`started_ops`）及冻结视野内的工序
+
+```python
+for op_id, frozen in frozen_ops.items():
+    if op_id in start_vars:
+        model.Add(start_vars[op_id] == frozen.start_slot)
+        model.Add(end_vars[op_id] == frozen.end_slot)
+```
+
+$$
+s_{m,i} = \bar{s}_{m,i},\ e_{m,i} = \bar{e}_{m,i}, \quad \forall (m,i) \in F
+$$
+
+其中冻结集合 $F$ 的确定规则（`compute_frozen_ops`）：
+
+$$
+F = \{(m,i) \mid \text{op}_{m,i} \in \text{started\_ops}\} \cup \{(m,i) \mid s_{m,i} > t_{\text{now}} \land s_{m,i} \leq t_{\text{now}} + H_{\text{freeze}}\}
+$$
+
+已启动工序**无条件冻结**（不受 $H_{\text{freeze}}$ 限制）。
+
+---
+
+#### C10 Anchor Fix-and-Optimize 约束（V2.5 新增）⚠️ **新**
+
+**适用范围**：TRCGRepairPolicy / GARepairPolicy 局部修复模式中，**非解锁任务** 的 Op4（pad_hold）和 Op6（launch）
+
+这是 V2.5 核心创新之一，将大邻域搜索（LNS）中的 "fix" 操作以 CP-SAT 硬约束实现：
+
+```python
+# Stage 2 中对非 unlock missions 施加硬位置锁定
+for op_id, anchor_start in anchor_fixes.items():
+    if op_id in start_vars and op_id not in frozen_ops:
+        model.Add(start_vars[op_id] == anchor_start)   # 硬位置锚点
+```
+
+锚点候选集在施加前通过 `_check_anchor_feasibility()` 进行 **5 步可行性预检**：
+
+| 步骤 | 检验内容 | 跳过原因字段 |
+|------|---------|------------|
+| 1 | prev_plan 中存在 Op4/Op6 分配 | `skip_missing_prev_assignment` |
+| 2 | Op4/Op6 的 prev 位置在当前 horizon 内 | `skip_out_of_horizon` |
+| 3 | Op6 prev 位置仍落在 time_windows 内 | `skip_window_mismatch` |
+| 4 | Op4/Op6 prev 位置不与资源不可用区间重叠 | `skip_resource_unavailable_pad/launch` |
+| 5 | Op4→Op5→Op6 隐含等待时长满足 Op5 可变范围 | `skip_wait_violation` |
+
+通过预检的锚点进一步做**无冲突筛选**（与已冻结区间或其他锚点不重叠）后才最终施加：
+
+$$
+s_{m,4} = \bar{s}_{m,4}^{\text{prev}},\ s_{m,6} = \bar{s}_{m,6}^{\text{prev}}, \quad \forall m \notin \mathcal{U}\ \land\ \text{预检通过}
+$$
+
+其中 $\mathcal{U}$ 为 LLM/GA 推断出的解锁集（unlock_mission_ids）。
+
+**Stage 1 不施加锚点**（关键设计决策）：Stage 1 纯延迟最优化不受锚点约束，确保 `delay_bound` 是真实最优值，不因锚点偏紧导致 Stage 2 过度受限。
+
+---
+
+### 5.2 软约束与目标函数（Soft Constraints / Objectives）
+
+#### O1 Stage 1 目标：最小化加权延误
+
+$$
+\min \sum_{m \in M} p_m \cdot \max\!\left(0,\ s_{m,6} - d_m\right)
+$$
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| $p_m$ | 任务优先级权重 | 0.1–1.0 |
+| $d_m$ | 软截止时间（due slot） | 场景生成 |
+
+#### O2 Stage 2 延迟上界约束（ε-Constraint，兼硬约束）
+
+Stage 2 引入 ε-constraint 将 Stage 1 最优延误 $D^*$ 作为上界，放宽比例为 $\varepsilon$：
+
+```python
+delay_bound = total_delay_stage1 * (1 + config.epsilon_solver)
+model.Add(sum(total_delay_terms) <= int(round(delay_bound * 100)))
+```
+
+$$
+\sum_{m \in M} p_m \cdot \max\!\left(0,\ s_{m,6} - d_m\right) \leq (1 + \varepsilon) \cdot D^*
+$$
+
+调参范围：$\varepsilon \in \{0.0,\ 0.02,\ 0.05,\ 0.10\}$
+
+#### O3 Stage 2 目标：最小化加权 Drift
+
+$$
+\min \sum_{m \in M} p_m \cdot \text{Drift}_m
+$$
+
+**Drift 四项分解**（V3 定义，代码实现于 `_solve_v2_1_stage2_with_delay_bound`）：
+
+| 项目 | CP-SAT 建模 | 权重 | 语义 |
+|------|------------|------|------|
+| Op6 时间偏移 | `AddAbsEquality(shift_abs, diff_var)` | $0.7 \times p_m$ | 发射时刻漂移 |
+| Op4 时间偏移 | `AddAbsEquality(shift_abs, diff_var)` | $0.3 \times p_m$ | Pad 占用时刻漂移 |
+| 窗口切换 | `BoolVar window_switch` = $1 - \text{choice}[\text{prev\_idx}]$ | $\kappa_{\text{win}} \times p_m$ | 发射窗口变化 |
+| 序列切换 | `BoolVar seq_switch` 通过前驱保持约束编码 | $\kappa_{\text{seq}} \times p_m$ | Pad 排队顺序倒换 |
+
+$$
+\text{Drift}_m = 0.7 \cdot |s^t_{m,6} - s^{t-1}_{m,6}|
+             + 0.3 \cdot |s^t_{m,4} - s^{t-1}_{m,4}|
+             + \kappa_{\text{win}} \cdot \mathbb{1}\!\left[w^t_m \neq w^{t-1}_m \land \text{旧窗口可行}\right]
+             + \kappa_{\text{seq}} \cdot \mathbb{1}\!\left[\text{pred}^t(m) \neq \text{pred}^{t-1}(m)\right]
+$$
+
+其中参数默认值：$\kappa_{\text{win}} = 12$（slots/switch），$\kappa_{\text{seq}} = 6$（slots/switch）。
+
+**Warm Start 优化**：Stage 2 对 `start_vars` / `end_vars` / `window_choice_vars` 添加来自 `prev_plan` 的 `AddHint()`，帮助求解器在时限内更快收敛到高质量解。
+
+---
+
+### 5.3 预处理约束（Pre-processing Constraints，仿真层）
+
+预处理约束在 **仿真器层（simulator.py）** 而非 CP-SAT 模型内执行，但对求解器所接收的有效输入空间构成硬性限制。
+
+#### P1 Op6 候选窗口 Range Calendar 交集过滤
+
+每次重排前动态计算 Op6 的有效窗口集合：
+
+```python
+candidate_windows[m] = mission_windows[m] ∩ range_calendar[current_state]
+candidate_windows[m] = [w for w in candidate_windows[m] if w.length >= op6_duration]
+```
+
+$$
+W_m^{\text{candidate}} = \left\{w \cap w_r \mid w \in W_m,\ w_r \in \mathcal{RC}_t,\ |w \cap w_r| \geq \text{dur}_{m,6}\right\}
+$$
+
+若过滤后 $W_m^{\text{candidate}} = \emptyset$，求解器直接报 INFEASIBLE。
+
+#### P2 Range Closure 可行性护栏（Feasibility Guard）
+
+扰动生成时限制 range_closure 事件的幅度，防止产生不可行场景：
+
+- **护栏 A**：单日 `range_calendar[day]` 不允许被清空（至少保留 1 个窗口段）
+- **护栏 B**：任意任务 $m$ 的 Op6 候选窗口不允许被完全清空
+- 触发护栏时跳过本次 closure 事件，维持上一状态
+
+---
+
+### 5.4 约束关系一览
+
+```
+                    ┌────────────────────────────────────────────┐
+                    │             仿真层预处理（P1, P2）           │
+                    │  range_calendar ∩ mission_windows → W_eff  │
+                    └──────────────────┬─────────────────────────┘
+                                       │ 传入有效候选窗口
+                    ┌──────────────────▼─────────────────────────┐
+                    │              CP-SAT 模型                     │
+                    │                                              │
+                    │  硬约束：                                    │
+                    │   C1 释放时间   start[op] ≥ release[op]    │
+                    │   C2 工序时长   end = start + dur           │
+                    │   C3 前序       s_i ≥ e_{i-1}              │
+                    │   C4 Pad连续性  s[Op5]=e[Op4], s[Op6]=e[Op5]│
+                    │   C5 Op5可变长  dur[Op5]∈[min,min+max_wait] │
+                    │   C6 窗口选择   ExactlyOne(window_choice)  │
+                    │   C7 资源NoOverlap  (含Op3b多资源)          │
+                    │   C8 资源不可用 Blocker闭区间               │
+                    │   C9 冻结       started OR in freeze_horizon│
+                    │   C10 锚点LNS   非unlock task硬位置固定      │
+                    │                                              │
+                    │  Stage 1 目标：min Σ p_m·delay_m           │
+                    │  Stage 2 ε约束：Σdelay ≤ (1+ε)·D*          │
+                    │  Stage 2 目标：min Σ p_m·Drift_m            │
+                    └──────────────────────────────────────────────┘
+```
+
+---
+
+### 5.5 约束参数速查表
+
+| 约束 | 参数名 | 默认值 | 可调范围 | 说明 |
+|------|--------|--------|---------|------|
+| C5 Op5最大等待 | `op5_max_wait_slots` | 96 slots (24h) | — | 对应 `config.op5_max_wait_hours=24` |
+| C9 冻结视野 | `freeze_horizon` | 12 slots (2h) | {0,4,8,16,24}h | 实验可调参数 |
+| O2 延迟容差 | `epsilon_solver` | 0.05 | {0.0,0.02,0.05,0.10} | 实验可调参数 |
+| O3 窗口切换惩罚 | `kappa_win` | 12.0 slots | — | Drift 公式权重 |
+| O3 序列切换惩罚 | `kappa_seq` | 6.0 slots | — | Drift 公式权重 |
+| O3 Op6偏移权重 | `drift_alpha` | 0.7 | — | Drift = α·Op6shift + β·Op4shift |
+| O3 Op4偏移权重 | `drift_beta` | 0.3 | — | 同上 |
+| C10 Anchor锁定 | `unlock_mission_ids` | None→全局重排 | LLM/GA/heuristic | V2.5 TRCGRepair/GARepair |
+| — | `solver_timeout_s` | 30.0 s | — | CP-SAT总时限 |
+| — | `stage1_time_ratio` | 0.4 | — | Stage1占40%时限 |
+| — | `num_workers` | 4 | — | CP-SAT并行搜索线程数 |
+
