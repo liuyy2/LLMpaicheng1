@@ -241,7 +241,7 @@ class TRCGRepairPolicy(BasePolicy):
         #   若 Step 2.5 判定 skip，直接构造全解锁 MetaParams 返回。
         # ============================================================
         if _should_skip:
-            return self._build_skip_return(now, t0, trcg_dict, config, active_mission_ids)
+            return self._build_skip_return(now, t0, trcg_dict, config)
 
         # ============================================================
         # Step 4.1: 状态指纹跳过 — 若 TRCG 核心状态未变，复用上次 LLM 决策
@@ -473,18 +473,6 @@ class TRCGRepairPolicy(BasePolicy):
                     break
 
         _valid_unlock = sorted(_unlock_set)
-        _valid_unlock = self._finalize_unlock_set(
-            seed_unlock=_valid_unlock,
-            trcg_dict=trcg_dict,
-            eligible_ids=_eligible,
-            target_unlock=_target_unlock,
-            max_unlock=_max_unlock,
-            preferred_ids=[
-                decision.root_cause_mission_id,
-                decision.secondary_root_cause_mission_id,
-            ],
-            avoid_cover_all=True,
-        )
 
         # 如果过滤后 unlock 为空，使用空元组（= 全部锚定）而非 None（= 全解锁）
         # 这是关键改动：即使 LLM 没有选出需要解锁的 mission，
@@ -739,99 +727,12 @@ class TRCGRepairPolicy(BasePolicy):
         target_unlock = min(target_unlock, eligible_count)
         return target_unlock, max_unlock
 
-    @staticmethod
-    def _unlock_priority_order(
-        trcg_dict: Dict[str, Any],
-        eligible_ids: Set[str],
-        preferred_ids: Optional[List[str]] = None,
-    ) -> List[str]:
-        ordered: List[str] = []
-        seen: Set[str] = set()
-
-        def _add(mid: Optional[str]) -> None:
-            if not isinstance(mid, str) or not mid:
-                return
-            if mid not in eligible_ids or mid in seen:
-                return
-            ordered.append(mid)
-            seen.add(mid)
-
-        for mid in preferred_ids or []:
-            _add(mid)
-
-        for conflict in sorted(
-            trcg_dict.get('top_conflicts', []),
-            key=lambda x: -float(x.get('severity', 0.0)),
-        ):
-            for key in ('mission_a', 'mission_b', 'a', 'b'):
-                _add(conflict.get(key))
-
-        for urgent in sorted(
-            trcg_dict.get('urgent_missions', []),
-            key=lambda x: float(x.get('urgency_score', 9999.0)),
-        ):
-            _add(urgent.get('mission_id'))
-
-        for mid in sorted(eligible_ids):
-            _add(mid)
-
-        return ordered
-
-    @classmethod
-    def _finalize_unlock_set(
-        cls,
-        seed_unlock: List[str],
-        trcg_dict: Dict[str, Any],
-        eligible_ids: Set[str],
-        target_unlock: int,
-        max_unlock: int,
-        preferred_ids: Optional[List[str]] = None,
-        avoid_cover_all: bool = True,
-    ) -> List[str]:
-        if not eligible_ids:
-            return []
-
-        effective_cap = min(max_unlock, len(eligible_ids))
-        if avoid_cover_all and len(eligible_ids) > 1:
-            effective_cap = min(effective_cap, len(eligible_ids) - 1)
-        if effective_cap <= 0:
-            return []
-
-        target_unlock = max(1, min(target_unlock, effective_cap))
-        ordered = cls._unlock_priority_order(trcg_dict, eligible_ids, preferred_ids)
-
-        result: List[str] = []
-        seen: Set[str] = set()
-
-        def _push(mid: Optional[str]) -> None:
-            if not isinstance(mid, str) or not mid:
-                return
-            if mid not in eligible_ids or mid in seen or len(result) >= effective_cap:
-                return
-            result.append(mid)
-            seen.add(mid)
-
-        for mid in seed_unlock:
-            _push(mid)
-        for mid in ordered:
-            if len(result) >= target_unlock:
-                break
-            _push(mid)
-        if not result:
-            for mid in ordered:
-                _push(mid)
-                if result:
-                    break
-
-        return result
-
     def _build_skip_return(
         self,
         now: int,
         t0: float,
         trcg_dict: Dict[str, Any],
         config: Config,
-        active_mission_ids: Set[str],
     ) -> Tuple[MetaParams, None]:
         """
         跳过 LLM 时的快速返回路径（无冲突/低压力场景）。
@@ -860,18 +761,7 @@ class TRCGRepairPolicy(BasePolicy):
             max_unlock = 2
         if len(urgent_ids) >= 3 and _max_pressure >= 0.70:
             max_unlock = 3
-        target_unlock = 1 if _max_pressure < 0.70 else min(2, max_unlock)
-        use_unlock = tuple(
-            self._finalize_unlock_set(
-                seed_unlock=urgent_ids[:max_unlock],
-                trcg_dict=trcg_dict,
-                eligible_ids=set(active_mission_ids),
-                target_unlock=target_unlock,
-                max_unlock=max_unlock,
-                preferred_ids=urgent_ids,
-                avoid_cover_all=True,
-            )
-        )
+        use_unlock = tuple(urgent_ids[:max_unlock])
 
         meta = MetaParams(
             w_delay=self._w_delay,
@@ -1019,25 +909,6 @@ class TRCGRepairPolicy(BasePolicy):
                     break
 
         valid_unlock = sorted(_unlock_set)
-        _pressure = trcg_dict.get('bottleneck_pressure', {}) or {}
-        _max_p = max(_pressure.values(), default=0.0) if _pressure else 0.0
-        _stable_cap = 2
-        if _max_p >= 0.85 or len(trcg_dict.get('top_conflicts', [])) >= 4:
-            _stable_cap = 3
-        _target_unlock = max(1, min(_stable_cap, len(valid_unlock) or 1))
-        _max_unlock = max(_target_unlock, min(len(_eligible), len(valid_unlock) + 1))
-        valid_unlock = self._finalize_unlock_set(
-            seed_unlock=valid_unlock,
-            trcg_dict=trcg_dict,
-            eligible_ids=_eligible,
-            target_unlock=_target_unlock,
-            max_unlock=_max_unlock,
-            preferred_ids=[
-                prev_decision.root_cause_mission_id,
-                prev_decision.secondary_root_cause_mission_id,
-            ],
-            avoid_cover_all=True,
-        )
 
         # 复用上次 LLM 的 root_cause 信息
         if not valid_unlock:
