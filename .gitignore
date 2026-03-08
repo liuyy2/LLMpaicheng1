@@ -19,8 +19,10 @@ test_output_temp/
 figures/
 .claude/
 tmp_local_repair_smoke3/
+<<<<<<< HEAD
 # 忽略 Python 缓存文件
 __pycache__/
 *.py[cod]
+
 
 
