@@ -50,16 +50,21 @@
 | `fallback_rate` | $\frac{\text{num_forced_global}}{\text{num_replans}}$ | 回退链鲁棒性指标 |
 
 #### 🧪 实验框架完善
-- **run_batch_10day.py**：长周期测试（10天×3难度×3baseline×N个seeds）
+- **run_batch_10day.py**：长周期测试（10天×3难度×3 baseline×N个seeds），输出结构化 CSV
+- **run_compare_policies_once.py**：单次多策略对比（Fixed/NoFreeze/MockLLM/LLM），快速冒烟验证
+- **merge_results.py**：合并 LLM 与 baseline 的 `results_per_episode.csv`（自动对齐表头差异列）
+- **analyze_llm_deviation_bins.py**：分析 LLM 偏离基准参数时各状态特征区间与 episode 指标差异，生成分桶汇总 CSV
 - **Episode Case Study**：双泳道Gantt图可视化（Baseline vs Ours）
-- **7份新增文档**：从功能说明到测试指南，覆盖完整开发周期
+- **8份文档**：从功能说明到测试指南，覆盖完整开发周期
 
-#### 🔬 Phase 4 实验运行与代码迭代（2026-02-14至今）
-- **Qwen3-32B实际LLM实验**：results_V2.5/{BL, LLM}目录含多轮种子匹配实验
-- **RepairStepLog 3-way可观测性**：`llm_http_ok`/`llm_parse_ok`/`llm_decision_ok`（移除旧`llm_call_ok`）
-- **_auto_correct_llm_output**：自动纠正LLM选出的非活跃/已完成 mission_id
-- **_trcg_find_urgent回归修复**：移除错误的 started_ops 过滤
-- **unlock_mission_ids激活**：确保 Anchor Fix-and-Optimize 实际生效
+#### 🔬 Phase 4 实验运行与代码迭代（2026-02-14 至今）
+- **Qwen3-32B 实际LLM实验**：`results_V2.5/{BL, LLM}` 目录含多轮种子匹配实验（共 40+ 批次）
+- **RepairStepLog 3-way可观测性**：`llm_http_ok` / `llm_parse_ok` / `llm_decision_ok`（移除旧 `llm_call_ok` 单布尔字段）
+- **_auto_correct_llm_output**：自动纠正LLM选出的非活跃/已完成 mission_id，从TRCG候选池补齐
+- **_trcg_find_urgent回归修复**：移除错误的 started_ops 过滤，保留已启动但即将到期的任务
+- **unlock_mission_ids 激活**：确保 Anchor Fix-and-Optimize 实际传递给求解器生效
+- **difficulty 档位配置**：新增 `MISSIONS_BY_DIFFICULTY`（light=15/medium=20/heavy=25）、`DIFFICULTY_DISTURBANCE`、`SLACK_MULTIPLIER_BY_DIFFICULTY` 三套映射
+- **NoFreezePolicy / MinimalFreezePolicy**：新增无冻结基线策略，用于对比冻结机制效果
 
 ---
 
@@ -89,9 +94,11 @@
         │  (policies/)  │ │ (solver_)   │ │ (metrics.py)│
         │               │ │ cpsat.py)   │ │            │
         │ - Fixed       │ │            │ │ - Delay    │
-        │ - Greedy      │ │ CP-SAT     │ │ - Drift    │
-        │ - RealLLM     │ │ 两阶段求解  │ │ - Switch   │
-        │ - TRCGRepair  │ │ +Anchor LNS │ │ - Features │
+        │ - NoFreeze    │ │ CP-SAT     │ │ - Drift    │
+        │ - Greedy      │ │ 两阶段求解  │ │ - Switch   │
+        │ - RealLLM     │ │ +Anchor LNS │ │ - Features │
+        │ - TRCGRepair  │ │            │ │            │
+        │ - GARepair    │ │            │ │            │
         └───────┬───────┘ └────┬───────┘ └────────────┘
                 │              │
         ┌───────▼────────┐ ┌───▼──────────┐
@@ -263,11 +270,11 @@ class MetaParams:
 
 #### 策略实现
 
-**1. FixedWeightPolicy（固定参数策略，Baseline）**
+**1. FixedWeightPolicy（固定参数策略，Baseline B1）**
 ```python
 # 使用预设的固定参数
 params = MetaParams(
-    freeze_horizon=8,       # 固定8小时冻结
+    freeze_horizon=12,      # 固定12 slots冻结（2小时）  
     epsilon_solver=0.05,    # 固定5%延迟容差
     use_two_stage=True,
     kappa_win=12.0,
@@ -275,12 +282,22 @@ params = MetaParams(
 )
 ```
 
-**2. GreedyPolicy（启发式策略）**
+**2. NoFreezePolicy / MinimalFreezePolicy（无冻结策略，Baseline B2）**
+```python
+params = MetaParams(
+    freeze_horizon=0,       # 无冻结（或 freeze_horizon=4 for Minimal）
+    epsilon_solver=0.05,
+    use_two_stage=True,
+)
+```
+- 用于对照冻结机制的效果，体现无冻结时的高 drift / 低 delay 特性
+
+**3. GreedyPolicy（启发式策略）**
 - **EDFGreedy**: Earliest Due First（最早截止优先）
 - **WindowGreedy**: 优先分配窗口最少的任务
 - **特点**：不使用CP-SAT，直接构造可行解（速度快，质量低）
 
-**3. RealLLMPolicy（LLM元策略，第一代方法）**
+**4. RealLLMPolicy（LLM元策略，第一代方法）**
 
 **工作流程**：
 ```
@@ -516,9 +533,35 @@ def ga_search_unlock_set(candidate_pool, prev_plan, state, K=5):
 - **性能基准**：GA作为成熟的Matheuristic方法，提供公平的性能对比标准
 - **消融研究**：可通过调整GA参数（pop_size、generations）分析搜索预算与修复质量的权衡
 
-**6. MockLLMPolicy（模拟LLM策略，用于调试）**
+**6. NoFreezePolicy / MinimalFreezePolicy（无冻结/极短冻结基线，V2.5+）**
+
+**核心思想**：完全去除冻结机制（freeze_horizon=0），作为对照基线用于量化冻结机制的稳定性收益。
+
+```python
+class NoFreezePolicy(BasePolicy):
+    """
+    行为：freeze_horizon=0，每次 rolling 可完全重新安排所有任务
+    用途：与 FixedWeightPolicy 对比，评估冻结机制的价值
+    """
+    def decide(state, now, config):
+        return MetaParams(
+            freeze_horizon=0,          # 无冻结
+            epsilon_solver=0.05,
+            use_two_stage=True,
+            kappa_win=12.0,
+            kappa_seq=6.0
+        )
+```
+
+`MinimalFreezePolicy` 与之类似，但设置 `freeze_horizon=4`（1小时），体现最小保护区间。
+
+**实验价值**：
+- 对照无冻结时的高 drift / 低 delay 特性，证明冻结机制的稳定性价值
+- 作为 Baseline B2，与 FixedWeightPolicy（B1）形成完整的冻结粒度对比谱
+
+**7. MockLLMPolicy（模拟LLM策略，用于调试）**
 - 使用硬编码规则模拟 LLM 决策逻辑（if-else）
-- 用于快速验证框架正确性
+- 用于快速验证框架正确性，无需真实 API Key
 
 ---
 
@@ -809,10 +852,12 @@ def validate_schema(data: dict, schema: dict) -> bool:
 ┌────────────────────────▼────────────────────────────────┐
 │ 阶段3: 策略对比（在 Test Set）                           │
 │ 对比策略：                                               │
-│ - FixedWeightPolicy (最优参数)                           │
+│ - FixedWeightPolicy (固定参数，Baseline B1)              │
+│ - NoFreezePolicy (无冻结对照，Baseline B2)               │
 │ - GreedyPolicy (EDFGreedy / WindowGreedy)               │
-│ - RealLLMPolicy (zero-shot)                             │
-│ - MockLLMPolicy (规则模拟)                               │
+│ - RealLLMPolicy (zero-shot，第一代LLM方法)              │
+│ - GARepairPolicy (Matheuristic Baseline，无LLM)          │
+│ - TRCGRepairPolicy (第二代LLM方法，本方法)               │
 │                                                          │
 │ 配对比较：每个 seed 在相同扰动下运行所有策略              │
 └─────────────────────────────────────────────────────────┘
@@ -1073,6 +1118,24 @@ def _auto_correct_llm_output(decision, active_mission_ids, started_ops):
 **问题**：`MetaParams.unlock_mission_ids` 默认为 `None`，导致 solver 按全局重排处理（Anchor Fix-and-Optimize 未生效）。
 
 **修复**：`TRCGRepairPolicy.decide()` 始终返回非 `None` 的 `unlock_mission_ids`，确保 Anchor 约束实际传递给求解器。
+
+#### Difficulty 档位体系完善
+
+**新增三套难度映射**（`config.py`）：
+
+```python
+MISSIONS_BY_DIFFICULTY = {"light": 15, "medium": 20, "heavy": 25}
+
+DIFFICULTY_DISTURBANCE = {
+    "light":  {"p_weather": 0.04, "sigma_duration": 0.12, ...},
+    "medium": {"p_weather": 0.06, "sigma_duration": 0.18, ...},
+    "heavy":  {"p_weather": 0.08, "sigma_duration": 0.26, ...},
+}
+
+SLACK_MULTIPLIER_BY_DIFFICULTY = {"light": 1.5, "medium": 1.2, "heavy": 1.0}
+```
+
+`make_config_for_difficulty(difficulty, num_missions_override=None, **kwargs)` 工厂函数统一创建符合难度档位的 Config 实例，`run_batch_10day.py` 直接调用。
 
 ---
 
@@ -1496,4 +1559,187 @@ $$
 | — | `solver_timeout_s` | 30.0 s | — | CP-SAT总时限 |
 | — | `stage1_time_ratio` | 0.4 | — | Stage1占40%时限 |
 | — | `num_workers` | 4 | — | CP-SAT并行搜索线程数 |
+
+---
+
+## 6. 实验工具与脚本说明
+
+### 6.1 批量实验脚本
+
+#### run_batch_10day.py（主实验脚本）
+```bash
+python run_batch_10day.py [--seeds 0 1 2] [--output results/batch_10day]
+```
+- 运行 `light/medium/heavy × seeds × baselines` 完整矩阵
+- 内置 3 个基线：`static`（不重排）、`full_unlock`（全解锁）、`fixed_tuned`（固定参数+二阶段）
+- 输出 CSV 含 20 项指标：`on_time_rate`, `avg_delay`, `episode_drift`, `drift_per_replan`, `drift_per_day`, `drift_per_active_mission` 等
+- 每个 episode 同步写入 JSON 日志到 `output_dir/difficulty_policy_seed/`
+
+#### run_compare_policies_once.py（快速对比脚本）
+```bash
+python run_compare_policies_once.py [--seed 42] [--difficulty medium]
+```
+- 单次运行 Fixed / NoFreeze / MockLLM / LLMInterface 四种策略的对比
+- 输出控制台表格 + 可选 JSON 日志
+- 适合冒烟测试和快速机制验证
+
+#### run_one_episode.py（单 Episode 调试脚本）
+- 单次仿真 + 详细日志输出，便于 debug 单个 case
+
+#### run_experiments.py（参数调优脚本）
+- 在 Train Set（60 scenarios）上做网格搜索调参
+- 5×4 = 20 组 `(freeze_horizon, epsilon_solver)` 组合
+- 结果写入 `best_params.json`, `tuning_results.csv`, `episode_results.csv`
+
+### 6.2 结果分析工具
+
+#### merge_results.py（合并 CSV）
+```bash
+python merge_results.py --llm results_V2.5/LLM/3.05_2 --baseline results_V2.5/BL/305_2 --output merged/
+```
+- 合并 LLM 与 baseline 的 `results_per_episode.csv`
+- 自动对齐表头差异列（LLM-only 列或 baseline-only 列用空字符串填充）
+- 支持任意两个结果目录合并
+
+#### analyze_llm_deviation_bins.py（LLM偏离分析）
+```bash
+python analyze_llm_deviation_bins.py --llm_dir results_V2.5/LLM --results_csv merged/results_per_episode.csv
+```
+- 分析哪些状态特征区间更容易触发 LLM 偏离提示词基准参数
+- 计算偏离发生时的 episode 指标差异 (`delta_avg_delay`, `delta_episode_drift`)
+- 输出分桶汇总 CSV，支持论文 Figure 分析
+
+#### analyze.py（通用分析脚本）
+- 读取 `rolling_metrics.csv` / `episode_results.csv`
+- 计算统计摘要、生成对比表
+
+### 6.3 结果目录结构
+
+```
+results_V2.5/
+├── BL/          # Baseline 实验结果（固定参数策略，多批次，40+轮次）
+│   ├── 304_1/   # 格式：月日_批次
+│   ├── 305_2/
+│   └── ...
+├── LLM/         # LLM 实验结果（TRCGRepairPolicy，多批次 Qwen3-32B）
+│   ├── 3.04_1/  # 格式：月.日_批次
+│   ├── 3.05_2/
+│   └── ...
+├── baseline/    # 早期 baseline 存档
+└── env/         # 环境配置存档
+```
+
+每个实验目录内包含：
+- `results_per_episode.csv`：每个 episode 的汇总指标（20列）
+- `rolling_metrics.csv`：逐 slot 的详细指标
+- `episode_*/`：单 episode 的 JSON 日志（扰动序列、计划快照、指标）
+
+---
+
+## 7. 论文研究框架摘要
+
+### 7.1 研究问题与意义
+
+**研究问题**：如何在充满高频扰动（天气窗口收缩、设备故障、工序延误）的真实发射场环境下，对多任务共享稀缺资源的火箭发射调度计划实施高质量的在线动态重排？
+
+**工程意义**：发射场资源高度稀缺，一次调度决策失误可导致轨道窗口丢失或多任务链式延误，自动化在线重排可大幅降低人工介入成本并提升发射成功率。
+
+**学术意义**：首次将 LLM 作为"零样本元决策器"引入工业级动态调度场景，并提出以 TRCG 驱动的根因诊断-局部修复范式，为 LLM 辅助运筹优化提供了方法论参考。
+
+### 7.2 论文摘要
+
+针对发射场多任务共享稀缺资源场景下高频扰动（天气窗口收缩、设备故障、工序延误）带来的动态调度重排需求，提出一种基于大语言模型（LLM）根因诊断与局部修复的火箭发射动态排程方法。首先，构建带靶场日历窗口约束与多类扰动的滚动重排仿真环境，形成以准时率、加权延迟、计划漂移（Drift）为核心的评价指标体系；然后，引入时序资源冲突图对扰动后的计划进行根因定位，提取冲突簇、瓶颈压力、紧急度等结构化特征，并以此为输入驱动 LLM 进行零样本推理，输出需要"解锁"的最小任务集；最后，基于 CP-SAT 求解器的 Anchor Fix-and-Optimize 机制对解锁任务实施局部精确修复，辅以多级回退链保证方法在任意扰动下的可行性，并通过跨多难度等级、多随机种子的大规模对比实验表明所提方法在准时性与计划稳定性上的综合优越性。
+
+### 7.3 对比基线体系
+
+| 策略 | 类别 | 特征 |
+|------|------|------|
+| FixedWeightPolicy | 规则基线 B1 | 固定 $H_\text{freeze}=12$ slots、$\varepsilon=0.05$，每次全局重排 |
+| NoFreezePolicy | 规则基线 B2 | $H_\text{freeze}=0$，无冻结保护，每次全局重排 |
+| GreedyPolicy（EDF/Window） | 启发式基线 | 不调用 CP-SAT，速度最快，质量最低 |
+| RealLLMPolicy | LLM 元参数基线 | LLM 推理 $(H_\text{freeze}, \varepsilon)$，全局重排，无局部修复 |
+| GARepairPolicy | Matheuristic 基线 | 遗传算法搜索最优 unlock 集，CP-SAT 局部修复，**无 LLM** |
+| **TRCGRepairPolicy（本方法）** | **LLM 局部修复** | TRCG 根因诊断 + LLM 零样本 + Anchor LNS + 回退链 |
+
+### 7.4 核心指标体系（论文就绪）
+
+#### 准时性指标（Timeliness）
+
+| 指标 | 定义 | 论文用途 |
+|------|------|---------|
+| `avg_delay` | 平均延迟（slots） | Figure 3, Table 2 核心 |
+| `weighted_tardiness` | $\sum_m p_m \cdot \max(0, s_{m,6} - d_m)$ | Figure 4 Pareto 轴 |
+| `on_time_rate` | delay=0 任务比例 | Figure 3 补充 |
+| `completion_rate` | 完成率（须≈100%方可比较） | 可行性验证 |
+
+#### 稳定性指标（Stability）
+
+| 指标 | 定义 | 论文用途 |
+|------|------|---------|
+| `episode_drift` | 全 Episode 累计 Drift | Figure 2, 3, 4 核心 |
+| `drift_per_replan` | $\text{episode\_drift} / \text{num\_replans}$（归一化） | **核心**：跨策略公平比较 |
+| `drift_per_day` | $\text{episode\_drift} / \text{sim\_days}$ | 多天实验横向对比 |
+| `total_switches` | 总 Pad 切换次数 | Figure 2 机制分析 |
+
+#### 求解性能指标
+
+| 指标 | 定义 | 论文用途 |
+|------|------|---------|
+| `avg_solve_time_ms` | 平均求解时间（ms） | Table 1 效率对比 |
+| `num_replans` | 重排总次数 | Table 1 |
+| `feasible_rate` | 成功求解比例 | 鲁棒性证据 |
+
+#### LLM/修复专属指标（TRCGRepairPolicy）
+
+| 指标 | 定义 | 论文用途 |
+|------|------|---------|
+| `unlock_size_avg` | 平均解锁集大小 | 衡量修复局部性 |
+| `fallback_rate` | $\text{num\_forced\_global} / \text{num\_replans}$ | 回退链激活频率 |
+| `llm_time_total_ms` | LLM 推理总耗时 | 成本分析 |
+
+### 7.5 论文图表规划
+
+| 图表 | 类型 | 核心指标 | 目的 |
+|------|------|---------|------|
+| Figure 1 | 概念示意图 | — | Rolling Horizon + TRCG 流程说明 |
+| Figure 2 | 双泳道甘特图 + 折线图 | `plan_drift`, `num_switches` | 单 Episode Case Study（定性机制证据） |
+| Figure 3 | ECDF / Box Plot | `avg_delay`, `episode_drift` | 多策略多 seed 总体效果分布对比 |
+| Figure 4 | Pareto 散点图 | `weighted_tardiness` × `drift_per_replan` | 准时性–稳定性权衡前沿 |
+| Figure 5 | 分组柱状图 | `avg_delay`, `episode_drift` × 扰动强度 | 扰动分层鲁棒性分析 |
+| Table 1 | 实验配置表 | `avg_solve_time_ms`, `feasible_rate` | 基线公平性验证 |
+| Table 2 | 结果汇总表 | 8 个核心指标 mean±std | 主要实验结论 |
+
+### 7.6 消融研究规划
+
+| 消融项 | 对比维度 |
+|--------|---------|
+| 有/无 TRCG 诊断 | 根因定位的必要性 |
+| 有/无 Anchor LNS | 局部搜索的加速效果 |
+| LLM 决策 vs 启发式回退 | LLM 推理的增益 |
+| unlock_set 大小 K=1/3/5 | 解锁集规模的影响 |
+| TRCGRepair vs GARepair | LLM 推理 vs 随机搜索 |
+
+---
+
+## 8. 关键术语速查
+
+| 术语 | 含义 |
+|------|------|
+| RCPSP | 资源约束项目调度问题（Resource-Constrained Project Scheduling Problem） |
+| Rolling Horizon | 滚动时域重排：每隔固定时间步重新求解未来窗口（3小时间隔，24小时视野） |
+| TRCG | 时序资源冲突图（Temporal Resource Conflict Graph），识别扰动根因 |
+| Anchor Fix-and-Optimize | 锚定非扰动任务、仅对解锁任务重排的局部搜索（伪 LNS） |
+| Drift | 重排导致计划变动量的加权归一化度量，衡量计划稳定性 |
+| CP-SAT | Google OR-Tools 约束规划求解器，两阶段词典序优化 |
+| GARepairPolicy | 用遗传算法搜索最优解锁集的非 LLM Matheuristic 基线 |
+| $\varepsilon$-constraint | 第二阶段允许延迟相对最优值放宽的比例上界 |
+| Freeze Horizon | 冻结视野：当前时刻起 $H_\text{freeze}$ 小时内的工序锁定不移动 |
+| Op6 | 发射工序（关键路径末端，须落入 Range Calendar ∩ 轨道窗口交集） |
+| Range Calendar | 全局共享的发射场开放时间段（每天 3 段，W1/W2/W3） |
+| Range Closure | 天气导致的 Range 窗口动态收缩扰动，对 range_calendar 执行区间减法 |
+| Op3b | 联测工序（R3 + R_range_test），增加资源竞争复杂度 |
+| Pad Block | Op4（上塔）→Op5（等待）→Op6（发射）三元组，Pad 资源连续占用 |
+| unlock_mission_ids | LLM/GA/启发式决定的解锁任务集，仅此集合任务可被重排 |
+| decision_source | 决策来源标记：`llm` / `heuristic_fallback` / `forced_global` |
+| fallback_chain | 四级降级策略：扩大 unlock → 减小 freeze → 放宽 ε → 全局重排 |
 
