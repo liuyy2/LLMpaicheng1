@@ -998,7 +998,15 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
-    wide_target = max(12, int(len(eligible_ids) * 0.45))
+    pressure = trcg_dict.get("bottleneck_pressure", {}) or {}
+    max_pressure = max(pressure.values(), default=0.0) if pressure else 0.0
+
+    wide_ratio = 0.45
+    if max_pressure >= 0.90:
+        wide_ratio = 0.65
+    elif max_pressure >= 0.80:
+        wide_ratio = 0.55
+    wide_target = max(12, int(len(eligible_ids) * wide_ratio))
     wide_target = min(max(8, wide_target), max(8, len(eligible_ids)))
     cur_unlock = _expand_unlock_from_conflicts(
         cur_unlock,
@@ -1037,8 +1045,14 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
-    partial_target = max(len(cur_unlock), int(len(eligible_ids) * 0.70))
-    partial_target = min(max(10, partial_target), max(10, len(eligible_ids)))
+    partial_ratio = 0.70
+    if max_pressure >= 0.90 or len(eligible_ids) <= 12:
+        partial_ratio = 0.90
+    elif max_pressure >= 0.80:
+        partial_ratio = 0.82
+    partial_target = max(len(cur_unlock), int(len(eligible_ids) * partial_ratio))
+    partial_cap = len(eligible_ids) if len(eligible_ids) <= 1 else len(eligible_ids) - 1
+    partial_target = min(max(10, partial_target), max(10, partial_cap))
     cur_unlock = _expand_unlock_from_conflicts(
         cur_unlock,
         trcg_dict,

@@ -19,5 +19,6 @@ llm_logs/
 results/batch_10day/
 test_output_temp/
 figures/
-
+.claude/
+tmp_local_repair_smoke3/
 
