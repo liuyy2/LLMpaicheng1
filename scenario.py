@@ -130,6 +130,36 @@ def _compute_due_with_slack(
     return min(due_base, sim_total - 1)
 
 
+def _sample_release(
+    rng: random.Random,
+    mission_idx: int,
+    num_missions: int,
+    sim_total: int,
+    config: Config,
+) -> int:
+    release_upper = max(0, int(sim_total * config.release_upper_ratio))
+    if (
+        config.release_pattern != "wave"
+        or config.release_wave_count <= 1
+        or num_missions <= 1
+        or release_upper <= 0
+    ):
+        return rng.randint(0, release_upper)
+
+    wave_count = max(1, min(config.release_wave_count, num_missions))
+    centers = [
+        int(round(release_upper * ((wave_idx + 1) / float(wave_count + 1))))
+        for wave_idx in range(wave_count)
+    ]
+    wave_idx = mission_idx % wave_count
+    spread = max(0, config.release_wave_spread_slots)
+    lo = max(0, centers[wave_idx] - spread)
+    hi = min(release_upper, centers[wave_idx] + spread)
+    if hi < lo:
+        hi = lo
+    return rng.randint(lo, hi)
+
+
 def generate_missions_v2_1(
     seed: int,
     num_missions: int,
@@ -140,13 +170,11 @@ def generate_missions_v2_1(
     missions = []
 
     sim_total = config.sim_total_slots
-    # release 分布在 [0, 0.65 * sim_total] 内（前 65% 区间，避免前期拥堵/后期空转）
-    release_upper = int(sim_total * 0.65)
 
     for i in range(num_missions):
         mission_id = f"M{i:03d}"
 
-        release = rng.randint(0, release_upper)
+        release = _sample_release(rng, i, num_missions, sim_total, config)
         operations = []
         cumulative_duration = 0
 
@@ -597,16 +625,17 @@ def _generate_scenario_v2_1(
         )
 
     # 根据 difficulty 获取 slack_multiplier（默认 1.2）
-    _slack = 1.2
-    try:
-        from config import SLACK_MULTIPLIER_BY_DIFFICULTY as _slk
-        for _d, _s in _slk.items():
-            from config import MISSIONS_BY_DIFFICULTY as _mbd
-            if _mbd.get(_d) == num_missions:
-                _slack = _s
-                break
-    except Exception:
-        pass
+    _slack = config.slack_multiplier_override if config.slack_multiplier_override is not None else 1.2
+    if config.slack_multiplier_override is None:
+        try:
+            from config import SLACK_MULTIPLIER_BY_DIFFICULTY as _slk
+            for _d, _s in _slk.items():
+                from config import MISSIONS_BY_DIFFICULTY as _mbd
+                if _mbd.get(_d) == num_missions:
+                    _slack = _s
+                    break
+        except Exception:
+            pass
 
     missions = generate_missions_v2_1(seed, num_missions, config, slack_multiplier=_slack)
     resources = generate_resources_v2_1(seed, config)
@@ -628,7 +657,13 @@ def _generate_scenario_v2_1(
         "num_resources": len(resources),
         "enable_range_calendar": config.enable_range_calendar,
         "enable_range_test_asset": config.enable_range_test_asset,
-        "weather_mode": config.weather_mode
+        "weather_mode": config.weather_mode,
+        "scenario_profile": config.scenario_profile,
+        "release_pattern": config.release_pattern,
+        "release_upper_ratio": config.release_upper_ratio,
+        "release_wave_count": config.release_wave_count,
+        "release_wave_spread_slots": config.release_wave_spread_slots,
+        "slack_multiplier_override": config.slack_multiplier_override,
     }
 
     return Scenario(

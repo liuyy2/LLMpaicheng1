@@ -36,7 +36,10 @@ from typing import Dict, List, Any, Tuple, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
-from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY, DIFFICULTY_DISTURBANCE
+from config import (
+    Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY,
+    DIFFICULTY_DISTURBANCE, SCENARIO_PROFILES,
+)
 from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
@@ -81,6 +84,7 @@ class ExperimentConfig:
     
     # 扰动强度分布（轻/中/重各 1/3）
     disturbance_levels: List[str] = field(default_factory=lambda: ["light", "medium", "heavy"])
+    scenario_profile: str = "default"
     
     # 调参网格（扩展上界，保持4×4×4×4=256组合）
         # Tuning grid (two-stage)
@@ -265,11 +269,13 @@ class RollingLogEntry:
 # ============================================================================
 
 def create_config_for_disturbance(level: str, solver_timeout: float = 20.0,
-                                   num_missions_override: int = None) -> Config:
+                                   num_missions_override: int = None,
+                                   scenario_profile: str = "default") -> Config:
     """根据扰动强度创建配置（已经自动固定任务数）"""
     return make_config_for_difficulty(
         difficulty=level,
         num_missions_override=num_missions_override,
+        scenario_profile=scenario_profile,
         solver_timeout_s=solver_timeout,
     )
 
@@ -350,9 +356,14 @@ def run_single_episode(
     """
     wall_start_time = time.time()
     
-    # 创建配置（已自动按 difficulty 固定任务数）
-    config = create_config_for_disturbance(disturbance_level, solver_timeout,
-                                           num_missions_override=num_missions_override)
+    # Build scenario config with optional profile overlay.
+    scenario_profile = getattr(exp_config, "scenario_profile", "default")
+    config = create_config_for_disturbance(
+        disturbance_level,
+        solver_timeout,
+        num_missions_override=num_missions_override,
+        scenario_profile=scenario_profile,
+    )
     
     # 生成场景
     scenario = generate_scenario(seed=seed, config=config)
@@ -712,7 +723,10 @@ def grid_search_tuning(
     ))
     def _evaluate_policy(policy_name: str, policy_params: Dict[str, Any]) -> Dict[str, float]:
         tasks = [
-            (seed, level, policy_name, policy_params, "train", exp_config.solver_timeout_s, None, None)
+            (
+                seed, level, policy_name, policy_params, "train",
+                exp_config.solver_timeout_s, exp_config, None
+            )
             for seed, level in train_assignments
         ]
         delays = []
@@ -1926,6 +1940,11 @@ def main():
         "--num-missions", type=int, default=None,
         help="手动覆盖任务数 (若指定则忽略 difficulty 默认值)"
     )
+    parser.add_argument(
+        "--scenario-profile", type=str, default="default",
+        choices=sorted(SCENARIO_PROFILES.keys()),
+        help="Scenario structure profile: default=baseline, local_repair=more room for local repair"
+    )
     
     # ========== LLM 参数 ==========
     parser.add_argument(
@@ -2004,6 +2023,7 @@ def main():
         epsilon_relative=args.epsilon_relative,
         epsilon_value=args.epsilon_value,
         disturbance_levels=disturbance_levels,
+        scenario_profile=args.scenario_profile,
         # LLM 参数
         llm_base_url=args.llm_base_url,
         llm_model=args.llm_model,

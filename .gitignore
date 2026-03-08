@@ -1,6 +1,5 @@
 results_V2.5/
 logs/
-__pycache__/
 results_test_llm/
 results_v2_2/
 logs/episode_1_fixed/
@@ -14,10 +13,13 @@ results_V2.5_quick/
 results_quick_1/
 results_quick_2/
 results_V2.5_LLM_30_3/
-__pycache__/
 llm_logs/
 results/batch_10day/
 test_output_temp/
 figures/
-
+.claude/
+tmp_local_repair_smoke3/
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
 

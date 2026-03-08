@@ -13,7 +13,7 @@ import sys
 import json
 from datetime import datetime
 
-from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY
+from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, MISSIONS_BY_DIFFICULTY, SCENARIO_PROFILES
 from scenario import generate_scenario, save_scenario
 from simulator import simulate_episode, save_episode_logs
 from policies.policy_fixed import FixedWeightPolicy
@@ -56,6 +56,11 @@ def parse_args():
     parser.add_argument(
         "--num-missions", type=int, default=None,
         help="Override mission count (default: use difficulty preset)"
+    )
+    parser.add_argument(
+        "--scenario-profile", type=str, default="default",
+        choices=sorted(SCENARIO_PROFILES.keys()),
+        help="Scenario structure profile (default: default)"
     )
     return parser.parse_args()
 
@@ -182,6 +187,7 @@ def main():
     config = make_config_for_difficulty(
         difficulty=args.difficulty,
         num_missions_override=args.num_missions,
+        scenario_profile=args.scenario_profile,
     )
     print(f"  Config: difficulty={args.difficulty}, sim_total_slots={config.sim_total_slots}, "
           f"num_missions={config.num_missions}")

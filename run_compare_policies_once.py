@@ -9,7 +9,7 @@ import time
 from typing import Dict, List, Any
 from dataclasses import dataclass
 
-from config import Config, DEFAULT_CONFIG, make_config_for_difficulty
+from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, SCENARIO_PROFILES
 from scenario import generate_scenario, Scenario
 from simulator import simulate_episode, EpisodeResult, save_episode_logs
 from policies import (
@@ -283,6 +283,11 @@ def main():
         "--num-missions", type=int, default=None,
         help="手动覆盖任务数"
     )
+    parser.add_argument(
+        "--scenario-profile", type=str, default="default",
+        choices=sorted(SCENARIO_PROFILES.keys()),
+        help="???? profile (default: default)"
+    )
     
     args = parser.parse_args()
     
@@ -291,6 +296,7 @@ def main():
     config = make_config_for_difficulty(
         difficulty=args.difficulty,
         num_missions_override=args.num_missions,
+        scenario_profile=args.scenario_profile,
     )
     
     results = run_policy_comparison(
