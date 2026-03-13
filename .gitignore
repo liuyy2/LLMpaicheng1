@@ -23,6 +23,10 @@ tmp_local_repair_smoke3/
 # 忽略 Python 缓存文件
 __pycache__/
 *.py[cod]
+results\alns_small_batch/
+results\alns_smoke_batch/
+results\alns_smoke_compare/
+results/
 
 
 

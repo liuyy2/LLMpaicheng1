@@ -1264,8 +1264,17 @@ def _simulate_episode_v2_1(
                         _decision_source.startswith("llm")
                         and _drift_anchor <= _drift_free
                     )
+                    _anchor_alns_soft_keep = (
+                        _decision_source.startswith("alns")
+                        and _anchor_applied >= 1
+                    )
                     _candidates = [("free", _result_free, _drift_free, _delay_free_w)]
-                    if _anchor_delay_ok and (_anchor_effective or _anchor_gain_override or _anchor_llm_soft_keep):
+                    if _anchor_delay_ok and (
+                        _anchor_effective
+                        or _anchor_gain_override
+                        or _anchor_llm_soft_keep
+                        or _anchor_alns_soft_keep
+                    ):
                         _candidates.append(("anchor", result, _drift_anchor, _delay_anchor_w))
 
                     _best_name, _best_result, _best_drift, _best_delay = min(

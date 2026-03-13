@@ -37,6 +37,10 @@ from policies.policy_ga_repair import (
     GARepairPolicy,
     create_ga_repair_policy,
 )
+from policies.policy_alns_repair import (
+    ALNSRepairPolicy,
+    create_alns_repair_policy,
+)
 
 
 __all__ = [
@@ -77,6 +81,8 @@ __all__ = [
     # GA 修复策略
     "GARepairPolicy",
     "create_ga_repair_policy",
+    "ALNSRepairPolicy",
+    "create_alns_repair_policy",
 ]
 
 
@@ -109,6 +115,14 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
         return FixedWeightPolicy(policy_name=name_lower, **kwargs)
     elif name_lower == "fixed_tuned":
         return FixedWeightPolicy(policy_name="fixed_tuned", **kwargs)
+    elif name_lower == "full_unlock":
+        return FixedWeightPolicy(
+            policy_name="full_unlock",
+            freeze_horizon=0,
+            use_two_stage=True,
+            epsilon_solver=kwargs.pop("epsilon_solver", 0.05),
+            **kwargs,
+        )
     elif name_lower == "nofreeze":
         return NoFreezePolicy(policy_name="nofreeze", **kwargs)
     elif name_lower in ("greedy", "greedy_edf"):
@@ -121,6 +135,8 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
         return create_trcg_repair_policy(**kwargs)
     elif name_lower in ("ga_repair", "garepair", "ga-repair"):
         return GARepairPolicy(policy_name="ga_repair", **kwargs)
+    elif name_lower in ("alns_repair", "alnsrepair", "alns-repair"):
+        return ALNSRepairPolicy(policy_name="alns_repair", **kwargs)
     else:
         raise ValueError(f"Unknown policy: {name}")
 
@@ -128,5 +144,5 @@ def create_policy(name: str, **kwargs) -> BasePolicy:
 # 获取所有可用策略名称
 AVAILABLE_POLICIES = [
     "fixed", "fixed_default", "fixed_tuned", "nofreeze", "greedy", "greedy_edf", "mockllm",
-    "trcg_repair", "trcg_repair_llm", "ga_repair",
+    "full_unlock", "trcg_repair", "trcg_repair_llm", "ga_repair", "alns_repair",
 ]

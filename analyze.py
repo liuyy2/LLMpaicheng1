@@ -846,6 +846,7 @@ POLICY_STYLES = {
     "llm_real": {"color": "#1abc9c", "marker": "P", "label": "LLM (Real)"},
     "fixed": {"color": "#3498db", "marker": "s", "label": "Fixed"},
     "ga_repair": {"color": "#9b59b6", "marker": "D", "label": "GA-Repair"},
+    "alns_repair": {"color": "#16a085", "marker": "X", "label": "ALNS-Repair"},
     "trcg_repair": {"color": "#e67e22", "marker": "P", "label": "TRCG-Repair"},
     "greedy": {"color": "#95a5a6", "marker": "v", "label": "Greedy (EDF)"}
 }

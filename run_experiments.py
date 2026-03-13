@@ -46,6 +46,7 @@ from policies import (
     FixedWeightPolicy, MockLLMPolicy,
     TRCGRepairPolicy, create_trcg_repair_policy,
     GARepairPolicy, create_ga_repair_policy,
+    ALNSRepairPolicy, create_alns_repair_policy,
     GreedyPolicy,
     create_policy, MetaParams
 )
@@ -508,6 +509,26 @@ def run_single_episode(
             enable_logging=True,
             episode_id=episode_id,
         )
+    elif policy_name == "alns_repair":
+        log_dir = None
+        if output_dir:
+            log_dir = os.path.join(output_dir, "logs", episode_id)
+            os.makedirs(log_dir, exist_ok=True)
+        policy = ALNSRepairPolicy(
+            policy_name="alns_repair",
+            K=policy_params.get("K", 5),
+            candidate_pool_size=policy_params.get("candidate_pool_size", 15),
+            max_iterations=policy_params.get("max_iterations", 10),
+            accept_worse_prob=policy_params.get("accept_worse_prob", 0.10),
+            drift_lambda=policy_params.get("drift_lambda", 5.0),
+            eval_timeout_s=policy_params.get("eval_timeout_s", 0.5),
+            final_timeout_s=policy_params.get("final_timeout_s", None),
+            eval_cp_workers=policy_params.get("eval_cp_workers", 1),
+            final_cp_workers=policy_params.get("final_cp_workers", None),
+            log_dir=log_dir,
+            enable_logging=True,
+            episode_id=episode_id,
+        )
     else:
         raise ValueError(f"Unknown policy: {policy_name}")
     
@@ -530,7 +551,7 @@ def run_single_episode(
     llm_cache_hit_rate = 0.0
     llm_fallback_count = 0
     
-    if policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair"):
+    if policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair", "alns_repair"):
         if hasattr(policy, 'get_llm_stats'):
             llm_stats = policy.get_llm_stats()
             llm_calls = llm_stats.get("call_count", 0)
@@ -555,7 +576,7 @@ def run_single_episode(
     wall_time_total_ms = int((time.time() - wall_start_time) * 1000)
     
     # 写入 episode 日志（JSONL 格式）
-    if output_dir and policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair"):
+    if output_dir and policy_name in ("mockllm", "trcg_repair", "trcg_repair_llm", "ga_repair", "alns_repair"):
         log_dir = os.path.join(output_dir, "logs", episode_id)
         os.makedirs(log_dir, exist_ok=True)
         
@@ -1708,7 +1729,8 @@ def run_test_only(
         "mockllm": {},
         "trcg_repair": {},
         "trcg_repair_llm": {},  # LLM params from exp_config
-        "ga_repair": {}  # GA Repair (Matheuristic baseline)
+        "ga_repair": {},  # GA Repair (Matheuristic baseline)
+        "alns_repair": {},  # ALNS Repair (lightweight search baseline)
     }
     
     # 过滤选定的策略
@@ -1926,7 +1948,7 @@ def main():
     parser.add_argument(
         "--policy", type=str, default=None,
         help="要评估的策略，逗号分隔 (default: 全部)。"
-             "可选: fixed_tuned, fixed_default, full_unlock, greedy, mockllm, trcg_repair, trcg_repair_llm, ga_repair"
+             "可选: fixed_tuned, fixed_default, full_unlock, greedy, mockllm, trcg_repair, trcg_repair_llm, ga_repair, alns_repair"
     )
     
     # ========== 路A: Difficulty / 固定任务数 ==========

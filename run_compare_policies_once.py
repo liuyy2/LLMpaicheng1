@@ -1,24 +1,17 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 import argparse
 import json
 import os
-import sys
 import time
-from typing import Dict, List, Any
 from dataclasses import dataclass
+from typing import Any, Dict, List
 
-from config import Config, DEFAULT_CONFIG, make_config_for_difficulty, SCENARIO_PROFILES
-from scenario import generate_scenario, Scenario
-from simulator import simulate_episode, EpisodeResult, save_episode_logs
-from policies import (
-    FixedWeightPolicy,
-    NoFreezePolicy,
-    MockLLMPolicy,
-    LLMInterfacePolicy,
-    create_policy
-)
+from config import Config, DEFAULT_CONFIG, SCENARIO_PROFILES, make_config_for_difficulty
+from scenario import generate_scenario
+from simulator import save_episode_logs, simulate_episode
+from policies import create_policy
 
 
 @dataclass
@@ -28,6 +21,7 @@ class PolicyComparisonResult:
     total: int
     on_time_rate: float
     avg_delay: float
+    weighted_tardiness: float
     max_delay: int
     episode_drift: float
     total_shifts: int
@@ -36,7 +30,7 @@ class PolicyComparisonResult:
     num_forced_replans: int
     avg_solve_time_ms: float
     total_runtime_s: float
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "policy_name": self.policy_name,
@@ -44,6 +38,7 @@ class PolicyComparisonResult:
             "total": self.total,
             "on_time_rate": round(self.on_time_rate, 4),
             "avg_delay": round(self.avg_delay, 2),
+            "weighted_tardiness": round(self.weighted_tardiness, 2),
             "max_delay": self.max_delay,
             "episode_drift": round(self.episode_drift, 4),
             "total_shifts": self.total_shifts,
@@ -51,75 +46,64 @@ class PolicyComparisonResult:
             "num_replans": self.num_replans,
             "num_forced_replans": self.num_forced_replans,
             "avg_solve_time_ms": round(self.avg_solve_time_ms, 1),
-            "total_runtime_s": round(self.total_runtime_s, 2)
+            "total_runtime_s": round(self.total_runtime_s, 2),
         }
+
+
+def build_policy(name: str, output_dir: str, episode_id: str):
+    kwargs: Dict[str, Any] = {}
+    if name in ("trcg_repair", "ga_repair", "alns_repair", "mockllm"):
+        kwargs["log_dir"] = os.path.join(output_dir, "logs", episode_id)
+        kwargs["episode_id"] = episode_id
+        kwargs["enable_logging"] = True
+        os.makedirs(kwargs["log_dir"], exist_ok=True)
+    return create_policy(name, **kwargs)
 
 
 def run_policy_comparison(
     seed: int,
     config: Config = DEFAULT_CONFIG,
+    policy_names: List[str] = None,
     verbose: bool = False,
-    output_dir: str = None
+    output_dir: str = None,
 ) -> List[PolicyComparisonResult]:
-    # 1. Generate scenario
     scenario = generate_scenario(seed=seed, config=config)
     print("")
     print("Scenario generated:")
-    print(f"  - Missions: {len(scenario.missions)}")
-    print(f"  - Resources: {len(scenario.resources)}")
-    print(f"  - Disturbance events: {len(scenario.disturbance_timeline)}")
+    print(f"  Missions: {len(scenario.missions)}")
+    print(f"  Resources: {len(scenario.resources)}")
+    print(f"  Disturbance events: {len(scenario.disturbance_timeline)}")
 
-    # 2. 定义策略
-    policies = [
-        FixedWeightPolicy(
-            w_delay=10.0, w_shift=1.0, w_switch=5.0,
-            freeze_horizon=12, policy_name="fixed"
-        ),
-        NoFreezePolicy(
-            w_delay=10.0, w_shift=0.2, w_switch=1.0,
-            freeze_horizon=0, policy_name="full_unlock"
-        ),
-        MockLLMPolicy(
-            policy_name="mockllm",
-            enable_logging=True
-        ),
-        # 真实 LLM 策略（需配置 API Key）
-        LLMInterfacePolicy(
-            api_endpoint="https://api-inference.modelscope.cn/v1",
-            api_key="",  # 替换为实际密钥
-            model_name="Qwen/Qwen3-32B",
-            temperature=0.0,
-            enable=True,
-            policy_name="qwen3"
-        ),
-    ]
-    
-    # 3. 运行各策略
+    if not policy_names:
+        policy_names = ["full_unlock", "ga_repair", "alns_repair"]
+
     results: List[PolicyComparisonResult] = []
-    
-    for policy in policies:
-        print(f"\n{'─'*50}")
-        print(f" 运行策略: {policy.name}")
-        print(f"{'─'*50}")
-        
+    for policy_name in policy_names:
+        episode_id = f"compare_seed{seed}_{policy_name}"
+        policy = build_policy(policy_name, output_dir or "logs", episode_id)
+        print(f"\n{'=' * 50}")
+        print(f"Running policy: {policy.name}")
+        print(f"{'=' * 50}")
         start_time = time.time()
-        
         try:
             episode_result = simulate_episode(
                 policy=policy,
                 scenario=scenario,
                 config=config,
-                verbose=verbose
+                verbose=verbose,
             )
-            
-            # 提取指标
+            if output_dir:
+                policy_dir = os.path.join(output_dir, episode_id)
+                save_episode_logs(episode_result, policy_dir, scenario)
+
             m = episode_result.metrics
-            comparison_result = PolicyComparisonResult(
+            item = PolicyComparisonResult(
                 policy_name=policy.name,
                 completed=m.num_completed,
                 total=m.num_total,
                 on_time_rate=m.on_time_rate,
                 avg_delay=m.avg_delay,
+                weighted_tardiness=m.weighted_tardiness,
                 max_delay=m.max_delay,
                 episode_drift=m.episode_drift,
                 total_shifts=m.total_shifts,
@@ -127,195 +111,100 @@ def run_policy_comparison(
                 num_replans=m.num_replans,
                 num_forced_replans=m.num_forced_replans,
                 avg_solve_time_ms=m.avg_solve_time_ms,
-                total_runtime_s=episode_result.total_runtime_s
+                total_runtime_s=episode_result.total_runtime_s,
             )
-            results.append(comparison_result)
-            
-            # 打印简要结果
-            print(f"  ✓ 完成: {m.num_completed}/{m.num_total}")
-            print(f"  ✓ 准时率: {m.on_time_rate:.2%}")
-            print(f"  ✓ 平均延迟: {m.avg_delay:.2f} slots")
-            print(f"  ✓ Episode Drift: {m.episode_drift:.4f}")
-            print(f"  ✓ 运行时间: {episode_result.total_runtime_s:.2f}s")
-            
-            # 保存日志
-            if output_dir:
-                policy_log_dir = os.path.join(output_dir, f"episode_{seed}_{policy.name}")
-                save_episode_logs(episode_result, policy_log_dir, scenario)
-                
-                # 如果是 MockLLM，保存决策日志
-                if hasattr(policy, 'save_logs'):
-                    llm_log_path = os.path.join(policy_log_dir, "llm_decisions.jsonl")
-                    policy.save_logs(llm_log_path)
-                    
-        except Exception as e:
-            print(f"  ✗ 策略执行失败: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # 创建空结果
-            results.append(PolicyComparisonResult(
-                policy_name=policy.name,
-                completed=0, total=len(scenario.missions),
-                on_time_rate=0.0, avg_delay=float('inf'),
-                max_delay=0, episode_drift=0.0,
-                total_shifts=0, total_switches=0,
-                num_replans=0, num_forced_replans=0,
-                avg_solve_time_ms=0.0,
-                total_runtime_s=time.time() - start_time
-            ))
-    
+            results.append(item)
+            print(
+                f"  completed={m.num_completed}/{m.num_total} "
+                f"on_time={m.on_time_rate:.2%} avg_delay={m.avg_delay:.2f} "
+                f"drift={m.episode_drift:.4f} runtime={episode_result.total_runtime_s:.2f}s"
+            )
+        except Exception as exc:
+            print(f"  failed: {exc}")
+            results.append(
+                PolicyComparisonResult(
+                    policy_name=policy.name,
+                    completed=0,
+                    total=len(scenario.missions),
+                    on_time_rate=0.0,
+                    avg_delay=float("inf"),
+                    weighted_tardiness=float("inf"),
+                    max_delay=0,
+                    episode_drift=0.0,
+                    total_shifts=0,
+                    total_switches=0,
+                    num_replans=0,
+                    num_forced_replans=0,
+                    avg_solve_time_ms=0.0,
+                    total_runtime_s=time.time() - start_time,
+                )
+            )
     return results
 
 
-def print_comparison_table(results: List[PolicyComparisonResult]):
-    print(f"\n{'='*70}")
-    print(f" 策略对比结果汇总")
-    print(f"{'='*70}")
-    
-    # 表头
-    headers = [
-        "策略", "完成", "准时率", "平均延迟", "Drift", 
-        "Shifts", "Switches", "重排次数", "运行时间"
-    ]
-    
-    col_widths = [12, 8, 10, 10, 10, 8, 10, 10, 10]
-    
-    # 打印表头
-    header_line = "│"
-    for i, h in enumerate(headers):
-        header_line += f" {h:^{col_widths[i]}} │"
-    
-    separator = "├" + "┼".join(["─" * (w + 2) for w in col_widths]) + "┤"
-    top_line = "┌" + "┬".join(["─" * (w + 2) for w in col_widths]) + "┐"
-    bottom_line = "└" + "┴".join(["─" * (w + 2) for w in col_widths]) + "┘"
-    
-    print(top_line)
-    print(header_line)
-    print(separator)
-    
-    # 打印数据
-    for r in results:
-        row = [
-            r.policy_name[:12],
-            f"{r.completed}/{r.total}",
-            f"{r.on_time_rate:.1%}",
-            f"{r.avg_delay:.1f}",
-            f"{r.episode_drift:.4f}",
-            str(r.total_shifts),
-            str(r.total_switches),
-            str(r.num_replans),
-            f"{r.total_runtime_s:.2f}s"
-        ]
-        
-        row_line = "│"
-        for i, cell in enumerate(row):
-            row_line += f" {cell:^{col_widths[i]}} │"
-        print(row_line)
-    
-    print(bottom_line)
-    
-    # 找出最优指标
-    print("\n最优策略（按指标）:")
-    
-    # 最高准时率
-    best_ontime = max(results, key=lambda x: x.on_time_rate)
-    print(f"  - 准时率最高: {best_ontime.policy_name} ({best_ontime.on_time_rate:.2%})")
-    
-    # 最低延迟
-    best_delay = min(results, key=lambda x: x.avg_delay)
-    print(f"  - 平均延迟最低: {best_delay.policy_name} ({best_delay.avg_delay:.2f})")
-    
-    # 最稳定（最低 drift）
-    best_drift = min(results, key=lambda x: x.episode_drift)
-    print(f"  - 最稳定 (Drift): {best_drift.policy_name} ({best_drift.episode_drift:.4f})")
-    
-    # 最快
-    best_speed = min(results, key=lambda x: x.total_runtime_s)
-    print(f"  - 最快: {best_speed.policy_name} ({best_speed.total_runtime_s:.2f}s)")
+def print_comparison_table(results: List[PolicyComparisonResult]) -> None:
+    print("\n" + "=" * 88)
+    print("Policy Comparison")
+    print("=" * 88)
+    header = (
+        f"{'policy':<14} {'done':<8} {'on_time':<10} {'avg_delay':<10} "
+        f"{'wtard':<10} {'drift':<10} {'solve_ms':<10} {'runtime_s':<10}"
+    )
+    print(header)
+    print("-" * len(header))
+    for item in results:
+        print(
+            f"{item.policy_name:<14} {f'{item.completed}/{item.total}':<8} "
+            f"{item.on_time_rate:<10.2%} {item.avg_delay:<10.2f} "
+            f"{item.weighted_tardiness:<10.2f} {item.episode_drift:<10.4f} "
+            f"{item.avg_solve_time_ms:<10.1f} {item.total_runtime_s:<10.2f}"
+        )
 
 
-def save_comparison_results(
-    results: List[PolicyComparisonResult],
-    filepath: str,
-    seed: int
-):
+def save_comparison_results(results: List[PolicyComparisonResult], filepath: str, seed: int) -> None:
     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-    
-    output = {
-        "seed": seed,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "results": [r.to_dict() for r in results]
-    }
-    
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    
-    print(f"\n对比结果已保存至: {filepath}")
+    with open(filepath, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "seed": seed,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "results": [item.to_dict() for item in results],
+            },
+            fh,
+            indent=2,
+            ensure_ascii=False,
+        )
+    print(f"\nSaved comparison JSON: {filepath}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="单次策略对比 - 同一场景运行多个策略并比较结果"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="场景随机种子 (default: 42)"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="打印详细仿真信息"
-    )
-    parser.add_argument(
-        "--output", "-o", type=str, default=None,
-        help="结果输出目录 (default: None)"
-    )
-    parser.add_argument(
-        "--save-json", type=str, default=None,
-        help="对比结果 JSON 文件路径"
-    )
-    parser.add_argument(
-        "--difficulty", type=str, default="medium",
-        choices=["light", "medium", "heavy"],
-        help="扰动难度档位 (default: medium)"
-    )
-    parser.add_argument(
-        "--num-missions", type=int, default=None,
-        help="手动覆盖任务数"
-    )
-    parser.add_argument(
-        "--scenario-profile", type=str, default="default",
-        choices=sorted(SCENARIO_PROFILES.keys()),
-        help="???? profile (default: default)"
-    )
-    
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run one scenario with multiple policies")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--output", "-o", type=str, default="logs/compare_once")
+    parser.add_argument("--save-json", type=str, default=None)
+    parser.add_argument("--difficulty", type=str, default="medium", choices=["light", "medium", "heavy"])
+    parser.add_argument("--num-missions", type=int, default=None)
+    parser.add_argument("--scenario-profile", type=str, default="default", choices=sorted(SCENARIO_PROFILES.keys()))
+    parser.add_argument("--policies", type=str, default="full_unlock,ga_repair,alns_repair")
     args = parser.parse_args()
-    
-    # 运行对比
-    output_dir = args.output or f"logs/compare_{args.seed}"
+
+    policy_names = [name.strip() for name in args.policies.split(",") if name.strip()]
     config = make_config_for_difficulty(
         difficulty=args.difficulty,
         num_missions_override=args.num_missions,
         scenario_profile=args.scenario_profile,
     )
-    
     results = run_policy_comparison(
         seed=args.seed,
         config=config,
+        policy_names=policy_names,
         verbose=args.verbose,
-        output_dir=output_dir
+        output_dir=args.output,
     )
-    
-    # 打印对比表格
     print_comparison_table(results)
-    
-    # 保存结果
-    if args.save_json:
-        save_comparison_results(results, args.save_json, args.seed)
-    else:
-        # 默认保存位置
-        default_json = os.path.join(output_dir, "comparison.json")
-        save_comparison_results(results, default_json, args.seed)
+    save_path = args.save_json or os.path.join(args.output, "comparison.json")
+    save_comparison_results(results, save_path, args.seed)
 
 
 if __name__ == "__main__":
