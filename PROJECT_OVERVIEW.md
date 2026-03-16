@@ -16,8 +16,9 @@
 **如何利用大语言模型（LLM）的推理能力，实现动态调度策略的自适应参数调整与根因诊断修复？**
 
 - **第一代方法（RealLLMPolicy）**：使用固定权重优化求解器（CP-SAT），利用LLM根据状态特征在线推理最优元参数（freeze_horizon、epsilon_solver等）
-- **第二代方法（TRCGRepairPolicy，V2.5+）**：引入**时序资源冲突图（TRCG）**根因诊断，LLM推理需要"解锁"的冲突任务，结合Anchor Fix-and-Optimize（伪LNS）实现局部修复 + 四级回退链确保鲁棒性
+- **第二代方法（TRCGRepairPolicy，V2.5+）**：引入**时序资源冲突图（TRCG）**根因诊断，LLM推理需要"解锁"的冲突任务，结合Anchor Fix-and-Optimize（伪LNS）实现局部修复 + 多级回退链（8次尝试）确保鲁棒性
 - **对照方法（GARepairPolicy，V2.5+）**：用遗传算法搜索最优unlock子集 + CP-SAT局部修复，作为局部修复的非LLM Matheuristic Baseline
+- **对照方法（ALNSRepairPolicy，V2.5+）**：用自适应大邻域搜索（ALNS）替代遗传算法，更轻量的非LLM Matheuristic Baseline，与GARepairPolicy共同构成对照组
 - **创新点**：
   1. 首次将LLM作为"元策略"应用于工业级调度问题（零样本决策）
   2. 首创TRCG因果分析框架，将"全局重排"升级为"根因驱动的局部修复"
@@ -26,14 +27,14 @@
 ### V2.5 核心特性速览
 
 #### 🎯 研究方法演进
-| 维度 | V2.1 (RealLLMPolicy) | V2.5 (TRCGRepairPolicy) | V2.5 (GARepairPolicy) |
-|------|----------------------|-------------------------|-----------------------|
-| **LLM角色** | 元参数调整器 | 根因诊断 + 局部修复决策器 | **无LLM**（对照组） |
-| **输入** | 12维状态特征 | TRCG诊断摘要（冲突图+聚类） | TRCG候选池 |
-| **输出** | (freeze, epsilon) | (unlock_ids, root_cause) | GA搜索最优unlock子集 |
-| **求解范式** | 全局重排（所有任务） | 局部修复（3-5个解锁任务） | 局部修复（K=5个解锁任务） |
-| **计算复杂度** | $O(n^2)$ (20任务) | $O(k^2)$ (3任务) | $O(\text{pop} \times k^2)$ GA搜索 |
-| **鲁棒性** | 单次求解（成功/失败） | 四级回退链（保证可行） | 三级回退链（保证可行） |
+| 维度 | V2.1 (RealLLMPolicy) | V2.5 (TRCGRepairPolicy) | V2.5 (GARepairPolicy) | V2.5 (ALNSRepairPolicy) |
+|------|----------------------|-------------------------|-----------------------|------------------------|
+| **LLM角色** | 元参数调整器 | 根因诊断 + 局部修复决策器 | **无LLM**（对照组） | **无LLM**（对照组） |
+| **输入** | 12维状态特征 | TRCG诊断摘要（冲突图+聚类） | TRCG候选池 | TRCG候选池 |
+| **输出** | (freeze, epsilon) | (unlock_ids, root_cause) | GA搜索最优unlock子集 | ALNS搜索最优unlock子集 |
+| **求解范式** | 全局重排（所有任务） | 局部修复（3-5个解锁任务） | 局部修复（K=5个解锁任务） | 局部修复（K=4个解锁任务） |
+| **计算复杂度** | $O(n^2)$ (20任务) | $O(k^2)$ (3任务) | $O(\text{pop} \times k^2)$ GA搜索 | $O(\text{iter} \times k^2)$ ALNS搜索 |
+| **鲁棒性** | 单次求解（成功/失败） | 多级回退链（保证可行） | 三级回退链（保证可行） | 三级回退链（保证可行） |
 
 #### 🌐 Range Calendar系统（工业真实性增强）
 - **全局共享窗口**：模拟Range设施的有限开放时间（每天3段，共12小时）
@@ -99,6 +100,7 @@
         │ - RealLLM     │ │ +Anchor LNS │ │ - Features │
         │ - TRCGRepair  │ │            │ │            │
         │ - GARepair    │ │            │ │            │
+        │ - ALNSRepair  │ │            │ │            │
         └───────┬───────┘ └────┬───────┘ └────────────┘
                 │              │
         ┌───────▼────────┐ ┌───▼──────────┐
@@ -153,14 +155,14 @@
 
 #### 扰动生成
 
-**三种扰动强度**（用于实验分组）：
+**三种扰动强度**（用于实验分组，对应 `config.py` 的 `DIFFICULTY_DISTURBANCE`）：
 
 | 扰动类型 | Light | Medium | Heavy |
 |---------|-------|--------|-------|
-| 天气中断概率 | 5% | 7% | 10% |
-| Pad故障概率 | 2% | 3% | 5% |
-| 工序延迟标准差 | 12% | 20% | 30% |
-| 释放时间扰动 | 2 slots | 3 slots | 4 slots |
+| 天气中断概率（`p_weather`） | 4% | 6% | 8% |
+| Pad故障概率（`p_pad_outage`） | 1% | 1.5% | 2% |
+| 工序延迟标准差（`sigma_duration`） | 12% | 18% | 26% |
+| 释放时间扰动（`release_jitter_slots`） | 1 slot | 2 slots | 2 slots |
 
 **扰动事件类型**：
 1. **weather**: 天气中断（6-18 slots）
@@ -377,16 +379,24 @@ Output JSON:
    ├─ Stage1: min Σdelay   Stage2: min Σdrift (s.t. Stage1最优值±ε)
    └─ 显著降低求解空间（20任务→3解锁 = 17%变量）
 
-4. 三级回退链 → policy_llm_repair.solve_with_fallback_chain()
-   Level 0: 初始解锁集（LLM/启发式）
+4. 多级回退链 → policy_llm_repair.solve_with_fallback_chain()
+   Level 0 (initial): 初始解锁集（LLM/启发式）
    ├─ 失败 ↓
-   Level 1: 扩大解锁集（+瓶颈关联任务）
+   Level 1a (expand_unlock): 扩大解锁集（+2任务，max 8）
    ├─ 失败 ↓
-   Level 2: 减小冻结视野（freeze_horizon//2）
+   Level 1b (expand_unlock_wide): 再次扩大（+4任务，max 12）
    ├─ 失败 ↓
-   Level 3: 放松延迟容差（epsilon_solver×2）
+   Level 2a (reduce_freeze): 减小冻结视野（一档降级）
    ├─ 失败 ↓
-   Level 4: 强制全局重排（unlock all missions）
+   Level 2b (reduce_freeze_deep): 再次减小冻结视野
+   ├─ 失败 ↓
+   Level 3a (relax_epsilon): 放松延迟容差（epsilon阶梯提升）
+   ├─ 失败 ↓
+   Level 3b (wide_unlock_relaxed): 大范围解锁（~45%任务）+ 放松参数
+   ├─ 失败 ↓
+   Level 3c (partial_global_anchor): 部分全局解锁（~70%任务）
+   ├─ 失败 ↓
+   Final (global_replan): 强制全局重排（全量解锁，保证可行）
 ```
 
 **Prompt示例**（TRCG修复场景）：
@@ -419,7 +429,7 @@ Output JSON:
 **关键设计**：
 - **局部性**：只重排3-5个冲突任务，其余锚定 → 计划稳定性高
 - **因果推理**：TRCG暴露"谁阻塞谁"，LLM推理"谁需要让路"
-- **鲁棒性**：四级回退确保最终总有可行解（最差情况=全局重排）
+- **鲁棒性**：多级回退链（8次尝试 + 最终全局重排）确保最终总有可行解
 
 **5. GARepairPolicy（GA修复策略，Matheuristic Baseline，V2.5+）**
 
@@ -458,7 +468,7 @@ Output JSON:
 **关键参数（V2加速版）**：
 ```python
 # 基础GA参数
-pop_size = 16              # 种群大小
+pop_size = 12              # 种群大小
 generations = 5            # 最大进化代数
 K = 5                      # 解锁子集大小
 mutation_rate = 0.2        # 变异概率
@@ -466,7 +476,7 @@ candidate_pool_size = 15   # 候选池大小（从TRCG提取）
 
 # V2加速特性
 n_jobs = 8                 # 并行worker数量（适应度评估）
-eval_budget = 12           # 硬约束：最大评估次数
+eval_budget = 48           # 硬约束：最大评估次数
 early_stop_patience = 2    # 早停：连续N代无改进
 eval_timeout_s = 0.5       # 评估阶段单次CP-SAT超时
 final_timeout_s = 2.0      # 最终求解超时（默认=config.solver_timeout_s）
@@ -562,6 +572,43 @@ class NoFreezePolicy(BasePolicy):
 **7. MockLLMPolicy（模拟LLM策略，用于调试）**
 - 使用硬编码规则模拟 LLM 决策逻辑（if-else）
 - 用于快速验证框架正确性，无需真实 API Key
+
+**8. ALNSRepairPolicy（ALNS修复策略，轻量Matheuristic Baseline，V2.5+）**
+
+**核心思想**：复用与 GARepairPolicy 相同的 TRCG 候选池、CP-SAT 局部修复和回退链，仅将"搜索算法"替换为**自适应大邻域搜索（ALNS）**小循环。相比 GA，ALNS 每轮迭代更轻量（无种群），便于在较少 CP-SAT 调用预算内快速探索 unlock 子集。
+
+**工作流程**：
+```
+1. TRCG根因诊断 → features.build_trcg_summary()（复用）
+   └─ 生成候选解锁池（高紧急度任务，默认大小15）
+
+2. ALNS搜索 → _alns_search_unlock_set()
+   ├─ 初始解：随机抽取K=4个候选任务
+   ├─ 每轮：随机扰动（替换1-2个任务）+ CP-SAT评估
+   ├─ 接受准则：更优解必接受 + 以概率10%接受劣解（模拟退火式）
+   └─ 最大迭代次数10次（eval_timeout_s=0.5s，final_timeout_s可配置）
+
+3. Anchor Fix-and-Optimize → solver_cpsat.py（复用）
+   ├─ 与GARepairPolicy相同机制
+   └─ 固定非解锁任务的Op4/Op6，仅重排ALNS选出的K个任务
+
+4. 回退机制 → 三级回退链（简化版，与GARepairPolicy相同）
+```
+
+**关键参数**：
+```python
+K = 4                        # 解锁子集大小（略小于GA的5）
+candidate_pool_size = 15     # TRCG候选池大小
+max_iterations = 10          # ALNS最大迭代次数
+accept_worse_prob = 0.10     # 接受劣解概率（模拟退火）
+eval_timeout_s = 0.5         # 评估阶段单次CP-SAT超时
+drift_lambda = 5.0           # 联合目标中drift的权重系数
+```
+
+**与GARepairPolicy对比**：
+- **优势**：无种群初始化开销，每轮仅1次 CP-SAT 调用，总预算通常更少
+- **劣势**：无并行评估，搜索多样性略低于遗传算法
+- **定位**：更轻量的 Matheuristic Baseline，与 GARepairPolicy 共同构成非 LLM 对照组
 
 ---
 
@@ -1135,7 +1182,11 @@ DIFFICULTY_DISTURBANCE = {
 SLACK_MULTIPLIER_BY_DIFFICULTY = {"light": 1.5, "medium": 1.2, "heavy": 1.0}
 ```
 
-`make_config_for_difficulty(difficulty, num_missions_override=None, **kwargs)` 工厂函数统一创建符合难度档位的 Config 实例，`run_batch_10day.py` 直接调用。
+`make_config_for_difficulty(difficulty, num_missions_override=None, scenario_profile="default", **kwargs)` 工厂函数统一创建符合难度档位的 Config 实例，`run_batch_10day.py` 直接调用。
+
+**场景配置文件（SCENARIO_PROFILES）**：`config.py` 还定义了 `SCENARIO_PROFILES` 字典，支持通过 `scenario_profile` 参数切换场景配置模板：
+- `"default"`：标准配置（默认）
+- `"local_repair"`：为评测局部修复策略特化的配置，采用 Wave 式释放模式（任务集中在几个波次到来，加剧 Pad 冲突），更大的 Op6 窗口（3–5个），更短的 Range Closure 持续时间，以及难度相关的 slack_multiplier 覆盖值——这些设计使 TRCG 根因更加显著，适合放大 TRCGRepairPolicy / GARepairPolicy / ALNSRepairPolicy 之间的性能差异。
 
 ---
 
@@ -1568,10 +1619,10 @@ $$
 
 #### run_batch_10day.py（主实验脚本）
 ```bash
-python run_batch_10day.py [--seeds 0 1 2] [--output results/batch_10day]
+python run_batch_10day.py [--seeds 0 1 2] [--policies static,fixed_tuned,full_unlock,ga_repair,alns_repair] [--output results/batch_10day]
 ```
-- 运行 `light/medium/heavy × seeds × baselines` 完整矩阵
-- 内置 3 个基线：`static`（不重排）、`full_unlock`（全解锁）、`fixed_tuned`（固定参数+二阶段）
+- 运行 `light/medium/heavy × seeds × policies` 完整矩阵
+- 内置 5 个策略：`static`（不重排）、`fixed_tuned`（固定参数+二阶段）、`full_unlock`（全解锁）、`ga_repair`（GA局部修复）、`alns_repair`（ALNS局部修复）
 - 输出 CSV 含 20 项指标：`on_time_rate`, `avg_delay`, `episode_drift`, `drift_per_replan`, `drift_per_day`, `drift_per_active_mission` 等
 - 每个 episode 同步写入 JSON 日志到 `output_dir/difficulty_policy_seed/`
 
@@ -1659,7 +1710,8 @@ results_V2.5/
 | GreedyPolicy（EDF/Window） | 启发式基线 | 不调用 CP-SAT，速度最快，质量最低 |
 | RealLLMPolicy | LLM 元参数基线 | LLM 推理 $(H_\text{freeze}, \varepsilon)$，全局重排，无局部修复 |
 | GARepairPolicy | Matheuristic 基线 | 遗传算法搜索最优 unlock 集，CP-SAT 局部修复，**无 LLM** |
-| **TRCGRepairPolicy（本方法）** | **LLM 局部修复** | TRCG 根因诊断 + LLM 零样本 + Anchor LNS + 回退链 |
+| ALNSRepairPolicy | Matheuristic 基线 | ALNS 搜索最优 unlock 集，CP-SAT 局部修复，**无 LLM**（更轻量） |
+| **TRCGRepairPolicy（本方法）** | **LLM 局部修复** | TRCG 根因诊断 + LLM 零样本 + Anchor LNS + 多级回退链 |
 
 ### 7.4 核心指标体系（论文就绪）
 
@@ -1732,6 +1784,7 @@ results_V2.5/
 | Drift | 重排导致计划变动量的加权归一化度量，衡量计划稳定性 |
 | CP-SAT | Google OR-Tools 约束规划求解器，两阶段词典序优化 |
 | GARepairPolicy | 用遗传算法搜索最优解锁集的非 LLM Matheuristic 基线 |
+| ALNSRepairPolicy | 用自适应大邻域搜索（ALNS）搜索最优解锁集的非 LLM Matheuristic 基线（更轻量） |
 | $\varepsilon$-constraint | 第二阶段允许延迟相对最优值放宽的比例上界 |
 | Freeze Horizon | 冻结视野：当前时刻起 $H_\text{freeze}$ 小时内的工序锁定不移动 |
 | Op6 | 发射工序（关键路径末端，须落入 Range Calendar ∩ 轨道窗口交集） |
@@ -1739,7 +1792,7 @@ results_V2.5/
 | Range Closure | 天气导致的 Range 窗口动态收缩扰动，对 range_calendar 执行区间减法 |
 | Op3b | 联测工序（R3 + R_range_test），增加资源竞争复杂度 |
 | Pad Block | Op4（上塔）→Op5（等待）→Op6（发射）三元组，Pad 资源连续占用 |
-| unlock_mission_ids | LLM/GA/启发式决定的解锁任务集，仅此集合任务可被重排 |
+| unlock_mission_ids | LLM/GA/ALNS/启发式决定的解锁任务集，仅此集合任务可被重排 |
 | decision_source | 决策来源标记：`llm` / `heuristic_fallback` / `forced_global` |
-| fallback_chain | 四级降级策略：扩大 unlock → 减小 freeze → 放宽 ε → 全局重排 |
+| fallback_chain | 多级降级策略（最多8次尝试）：扩大 unlock → 减小 freeze → 放宽 ε → 强制全局重排 |
 
