@@ -646,6 +646,10 @@ def _solve_with_trcg_fallback(
     if chain.success:
         meta_params.attempt_idx = len(chain.attempts) - 1
         final = chain.attempts[-1] if chain.attempts else None
+        if final is not None:
+            meta_params.unlock_mission_ids = tuple(final.unlock_ids) if final.use_anchor else None
+            meta_params.freeze_horizon = FREEZE_HOURS_TO_SLOTS.get(final.freeze_hours, meta_params.freeze_horizon)
+            meta_params.epsilon_solver = final.epsilon
         if final and final.attempt_name == "final_global_replan":
             meta_params.decision_source = "forced_global"
             meta_params.fallback_reason = "stage2_infeasible_forced_global"
@@ -1281,6 +1285,15 @@ def _simulate_episode_v2_1(
                         _candidates,
                         key=lambda x: (x[2], x[3]),
                     )
+                    if (
+                        _decision_source.startswith("llm")
+                        and _anchor_delay_ok
+                        and _anchor_applied >= 1
+                        and _drift_anchor <= (_drift_free * 1.03 + 1e-6)
+                    ):
+                        _best_name, _best_result, _best_drift, _best_delay = (
+                            "anchor", result, _drift_anchor, _delay_anchor_w
+                        )
                     if _best_name == "free":
                         result = _best_result
                         if meta_params:

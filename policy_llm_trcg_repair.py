@@ -236,24 +236,38 @@ class TRCGRepairPolicy(BasePolicy):
         if not active_mission_ids:
             active_mission_ids = schedulable_ids - completed_mission_ids
 
+        eligible_active_ids = active_mission_ids - started_mission_ids - completed_mission_ids
+        decision_trcg_dict = self._sanitize_trcg_for_active_set(
+            trcg_dict,
+            active_mission_ids,
+        )
+        repair_profile = self._build_repair_profile(
+            decision_trcg_dict,
+            len(eligible_active_ids),
+            config,
+        )
+
         # ============================================================
         # Step 4: LLM 调用 → 校验 → 启发式回退
         #   若 Step 2.5 判定 skip，直接构造全解锁 MetaParams 返回。
         # ============================================================
         if _should_skip:
-            return self._build_skip_return(now, t0, trcg_dict, config)
+            return self._build_skip_return(now, t0, decision_trcg_dict, config)
 
         # ============================================================
         # Step 4.1: 状态指纹跳过 — 若 TRCG 核心状态未变，复用上次 LLM 决策
         #   fingerprint = (sorted_urgent_ids, sorted_conflict_pairs, sorted_active_ids)
         #   连续相似状态下避免重复调用 LLM（每次 ~40s），显著加速。
         # ============================================================
-        _state_fp = self._compute_state_fingerprint(trcg_dict, active_mission_ids)
+        _state_fp = self._compute_state_fingerprint(
+            decision_trcg_dict,
+            active_mission_ids,
+        )
         if (self._last_state_fingerprint is not None
                 and _state_fp == self._last_state_fingerprint
                 and self._last_llm_decision is not None):
             return self._build_stable_skip_return(
-                now, t0, trcg_dict, config,
+                now, t0, decision_trcg_dict, config,
                 self._last_llm_decision, self._last_decision_source or "llm",
                 active_mission_ids, started_mission_ids, completed_mission_ids,
             )
@@ -268,9 +282,16 @@ class TRCGRepairPolicy(BasePolicy):
         fallback_reason: Optional[str] = None
 
         if self._llm_client is not None and active_mission_ids:
+            prompt_candidate_ids = self._select_prompt_candidate_ids(
+                decision_trcg_dict,
+                eligible_active_ids or active_mission_ids,
+                repair_profile,
+            )
             # 4a. 构建 prompt
             user_prompt = build_repair_user_prompt(
-                trcg_dict, sorted(active_mission_ids)
+                decision_trcg_dict,
+                prompt_candidate_ids,
+                repair_profile=repair_profile,
             )
 
             # 4b. 调用 LLM
@@ -314,7 +335,7 @@ class TRCGRepairPolicy(BasePolicy):
                     active_mission_ids,
                     started_mission_ids,
                     completed_mission_ids,
-                    trcg_dict,
+                    decision_trcg_dict,
                 )
                 vr = validate_repair_decision(
                     corrected_output,
@@ -351,7 +372,7 @@ class TRCGRepairPolicy(BasePolicy):
         # 4d. 启发式回退
         if decision is None and active_mission_ids:
             decision = heuristic_repair_decision(
-                trcg_dict,
+                decision_trcg_dict,
                 active_mission_ids,
                 started_mission_ids,
                 completed_mission_ids,
@@ -390,30 +411,16 @@ class TRCGRepairPolicy(BasePolicy):
         # freeze = RepairDecision 的 24h = 96 slots（匹配 fixed_tuned best_params）
         # freeze = RepairDecision 的 24h = 96 slots（匹配 fixed_tuned best_params）
         # TRCG selective freezing 已在 simulator 中实现，此处使用标准 freeze_horizon
-        freeze_h_slots = max(
-            int(decision.freeze_horizon_hours * 60 / config.slot_minutes),
-            config.freeze_horizon,
-        )
+        freeze_h_slots = int(repair_profile['freeze_h_slots'])
         # ---- 自适应 epsilon ----
         # TRCG 的核心优势：根据场景冲突严重程度调节 epsilon。
         # 低冲突 → 更高 epsilon → Stage 2 有更宽松的延迟预算 → 更低 drift。
         # 高冲突 → 保守 epsilon → 优先保证延迟不过大。
         # fixed_tuned 使用固定 epsilon=0.10，无法根据场景调节。
-        _conflicts = trcg_dict.get('top_conflicts', [])
-        _urgents = trcg_dict.get('urgent_missions', [])
-        _pressure = trcg_dict.get('bottleneck_pressure', {})
-        _max_pressure = max(_pressure.values(), default=0.0) if _pressure else 0.0
-
-        base_epsilon = max(0.10, decision.epsilon_solver, config.default_epsilon_solver)
-        if len(_conflicts) == 0 and len(_urgents) <= 1 and _max_pressure < 0.6:
-            adaptive_epsilon = min(0.12, base_epsilon + 0.02)
-        elif len(_conflicts) <= 2 and _max_pressure < 0.8:
-            adaptive_epsilon = min(0.11, base_epsilon + 0.01)
-        else:
-            adaptive_epsilon = base_epsilon
-
-        # Keep delay budget close to fixed_tuned (0.10) to avoid delay inflation.
-        epsilon_solver = min(0.12, adaptive_epsilon)
+        epsilon_solver = max(
+            float(repair_profile['epsilon_solver']),
+            float(decision.epsilon_solver),
+        )
 
         # 策略确定 epsilon: 使用自适应 epsilon 而非固定值
         # TRCG selective freezing 已在 simulator 层面保证低 drift，
@@ -448,28 +455,38 @@ class TRCGRepairPolicy(BasePolicy):
         # 给 solver 更多优化空间。cap 到 active 的 50% 以保留 anchor 引导效果。
         # 降低 unlock 上限：更少 mission 被解锁 → 更多被锚定 → 更低 drift
         _unlock_set = set(_valid_unlock)
-        _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
-        _target_unlock, _max_unlock = self._compute_unlock_budget(
-            trcg_dict, len(_eligible)
-        )
+        _eligible = eligible_active_ids
+        _target_unlock = int(repair_profile['target_unlock'])
+        _max_unlock = int(repair_profile['max_unlock'])
 
         # 即使 LLM 只给了 1 个 root，也要补齐局部邻域，避免单点解锁退化为“尾部追加”。
         if len(_unlock_set) < _target_unlock:
-            conflicts = trcg_dict.get('top_conflicts', [])
+            conflicts = decision_trcg_dict.get('top_conflicts', [])
             for c in sorted(conflicts, key=lambda x: -float(x.get('severity', 0))):
-                for m in (c.get('a', ''), c.get('b', '')):
+                for m in (
+                    c.get('a', c.get('mission_a', '')),
+                    c.get('b', c.get('mission_b', '')),
+                ):
                     if m in _eligible and m not in _unlock_set and len(_unlock_set) < _max_unlock:
                         _unlock_set.add(m)
                 if len(_unlock_set) >= _target_unlock:
                     break
 
         if len(_unlock_set) < _target_unlock:
-            urgents = trcg_dict.get('urgent_missions', [])
+            urgents = decision_trcg_dict.get('urgent_missions', [])
             for u in sorted(urgents, key=lambda x: x.get('urgency_score', 9999)):
                 mid = u.get('mission_id', '')
                 if mid in _eligible and mid not in _unlock_set and len(_unlock_set) < _max_unlock:
                     _unlock_set.add(mid)
                 if len(_unlock_set) >= _target_unlock:
+                    break
+
+        if len(_unlock_set) < _target_unlock:
+            for mid in sorted(_eligible):
+                if mid in _unlock_set:
+                    continue
+                _unlock_set.add(mid)
+                if len(_unlock_set) >= _target_unlock or len(_unlock_set) >= _max_unlock:
                     break
 
         _valid_unlock = sorted(_unlock_set)
@@ -486,8 +503,8 @@ class TRCGRepairPolicy(BasePolicy):
             freeze_horizon=freeze_h_slots,
             use_two_stage=True,
             epsilon_solver=epsilon_solver,
-            kappa_win=config.default_kappa_win,
-            kappa_seq=config.default_kappa_seq,
+            kappa_win=float(repair_profile['kappa_win']),
+            kappa_seq=float(repair_profile['kappa_seq']),
             unlock_mission_ids=use_unlock,
             root_cause_mission_id=decision.root_cause_mission_id or None,
             secondary_root_cause_mission_id=decision.secondary_root_cause_mission_id,
@@ -572,18 +589,49 @@ class TRCGRepairPolicy(BasePolicy):
             return raw_text
 
         invalid_ids = started_mission_ids | completed_mission_ids
+        candidate_active_ids = sorted(active_mission_ids - invalid_ids)
         modified = False
+
+        def _ordered_candidates() -> List[str]:
+            degree: Dict[str, float] = {}
+            for conflict in trcg_dict.get('top_conflicts', []) or []:
+                for mid in (
+                    conflict.get('a', conflict.get('mission_a', '')),
+                    conflict.get('b', conflict.get('mission_b', '')),
+                ):
+                    if mid in candidate_active_ids:
+                        degree[mid] = degree.get(mid, 0.0) + float(conflict.get('severity', 0.0) or 0.0)
+
+            ordered: List[str] = sorted(degree, key=lambda x: (-degree[x], x))
+            for urgent in sorted(
+                trcg_dict.get('urgent_missions', []) or [],
+                key=lambda x: float(x.get('urgency_score', 9999.0)),
+            ):
+                mid = str(urgent.get('mission_id', '') or '')
+                if mid in candidate_active_ids and mid not in ordered:
+                    ordered.append(mid)
+            for mid in candidate_active_ids:
+                if mid not in ordered:
+                    ordered.append(mid)
+            return ordered
+
+        ordered_candidates = _ordered_candidates()
 
         # 修正 unlock_mission_ids
         unlock = data.get('unlock_mission_ids')
         if isinstance(unlock, list):
-            clean_unlock = [m for m in unlock if str(m) not in invalid_ids]
-            if len(clean_unlock) < len(unlock):
+            clean_unlock: List[str] = []
+            for mid in unlock:
+                mid = str(mid)
+                if mid in invalid_ids or mid not in active_mission_ids or mid in clean_unlock:
+                    continue
+                clean_unlock.append(mid)
+            if clean_unlock != unlock:
                 modified = True
-                data['unlock_mission_ids'] = clean_unlock
             unlock = clean_unlock
         else:
             unlock = []
+            modified = True
 
         # 当 unlock 被清空时，主动从 TRCG 冲突中补充 active mission
         # 避免 unlock=[] 导致后续退化为全解锁（=fixed_tuned 无区别）
@@ -618,8 +666,25 @@ class TRCGRepairPolicy(BasePolicy):
                     modified = True
 
         # 修正 root_cause_mission_id
+        target_unlock, max_unlock = TRCGRepairPolicy._compute_unlock_budget(
+            trcg_dict,
+            len(candidate_active_ids),
+        )
+        target_unlock = min(target_unlock, max_unlock)
+        for mid in ordered_candidates:
+            if len(unlock) >= target_unlock or len(unlock) >= max_unlock:
+                break
+            if mid not in unlock:
+                unlock.append(mid)
+                modified = True
+        data['unlock_mission_ids'] = unlock
+
         root = data.get('root_cause_mission_id', '')
-        if isinstance(root, str) and root in invalid_ids:
+        if (
+            not isinstance(root, str)
+            or root in invalid_ids
+            or root not in active_mission_ids
+        ):
             modified = True
             new_root = None
             # 优先从剩余 unlock 中选
@@ -646,14 +711,263 @@ class TRCGRepairPolicy(BasePolicy):
                     data['unlock_mission_ids'] = [new_root] + data.get('unlock_mission_ids', [])
 
         # 修正 secondary_root_cause_mission_id
+        if data.get('root_cause_mission_id') and data['root_cause_mission_id'] not in unlock:
+            data['unlock_mission_ids'] = [data['root_cause_mission_id']] + [
+                mid for mid in unlock if mid != data['root_cause_mission_id']
+            ]
+            unlock = data['unlock_mission_ids']
+            modified = True
+
         secondary = data.get('secondary_root_cause_mission_id')
-        if isinstance(secondary, str) and secondary in invalid_ids:
-            data['secondary_root_cause_mission_id'] = None
+        if (
+            isinstance(secondary, str)
+            and (secondary in invalid_ids or secondary not in active_mission_ids)
+        ):
+            replacement = next(
+                (mid for mid in unlock if mid != data.get('root_cause_mission_id')),
+                None,
+            )
+            data['secondary_root_cause_mission_id'] = replacement
             modified = True
 
         if modified:
             return _json.dumps(data, ensure_ascii=False)
         return raw_text
+
+    @staticmethod
+    def _sanitize_trcg_for_active_set(
+        trcg_dict: Dict[str, Any],
+        active_mission_ids: Set[str],
+    ) -> Dict[str, Any]:
+        """
+        Prompt-facing TRCG summary: keep only ACTIVE missions so the model sees
+        the same candidate space enforced by validation.
+        """
+        sanitized = dict(trcg_dict or {})
+        active = set(active_mission_ids or set())
+
+        raw_conflicts = trcg_dict.get('top_conflicts', []) or []
+        sanitized['top_conflicts'] = [
+            dict(conflict)
+            for conflict in raw_conflicts
+            if str(conflict.get('a', conflict.get('mission_a', '')) or '') in active
+            and str(conflict.get('b', conflict.get('mission_b', '')) or '') in active
+        ]
+
+        raw_clusters = trcg_dict.get('conflict_clusters', []) or []
+        filtered_clusters: List[Dict[str, Any]] = []
+        for cluster in raw_clusters:
+            members = [
+                str(mid) for mid in (cluster.get('members', []) or [])
+                if str(mid) in active
+            ]
+            center = str(cluster.get('center_mission_id', '') or '')
+            if center not in active and members:
+                center = members[0]
+            if center in active and members:
+                new_cluster = dict(cluster)
+                new_cluster['center_mission_id'] = center
+                new_cluster['members'] = members
+                filtered_clusters.append(new_cluster)
+        sanitized['conflict_clusters'] = filtered_clusters
+
+        raw_urgents = trcg_dict.get('urgent_missions', []) or []
+        sanitized['urgent_missions'] = [
+            dict(item)
+            for item in raw_urgents
+            if str(item.get('mission_id', '') or '') in active
+        ]
+        return sanitized
+
+    @staticmethod
+    def _build_repair_profile(
+        trcg_dict: Dict[str, Any],
+        eligible_count: int,
+        config: Config,
+    ) -> Dict[str, Any]:
+        """
+        Adaptive repair budget. High-pressure states need more initial solver
+        freedom, otherwise the policy pays for it later via forced global replans.
+        """
+        conflicts = trcg_dict.get('top_conflicts', []) or []
+        urgents = trcg_dict.get('urgent_missions', []) or []
+        pressure = trcg_dict.get('bottleneck_pressure', {}) or {}
+        max_pressure = max(
+            (
+                float(v) for v in pressure.values()
+                if isinstance(v, (int, float))
+            ),
+            default=0.0,
+        )
+        near_queue_n = sum(
+            1 for c in conflicts
+            if str(c.get('conflict_type', '')) == 'near_queue'
+        )
+        severe_conflicts = sum(
+            1 for c in conflicts
+            if float(c.get('severity', 0.0) or 0.0) >= 7.0
+        )
+
+        severity_level = 'low'
+        if (
+            max_pressure >= 0.98
+            or near_queue_n >= 7
+            or severe_conflicts >= 5
+            or len(urgents) >= 5
+        ):
+            severity_level = 'critical'
+        elif (
+            max_pressure >= 0.92
+            or near_queue_n >= 5
+            or severe_conflicts >= 3
+            or len(urgents) >= 4
+        ):
+            severity_level = 'high'
+        elif (
+            max_pressure >= 0.80
+            or near_queue_n >= 3
+            or severe_conflicts >= 2
+            or len(urgents) >= 3
+        ):
+            severity_level = 'medium'
+
+        if eligible_count <= 0:
+            return {
+                'target_unlock': 0,
+                'max_unlock': 0,
+                'prompt_candidate_limit': 0,
+                'freeze_h_slots': max(config.freeze_horizon, 0),
+                'freeze_h_hours': 0,
+                'epsilon_solver': max(0.05, config.default_epsilon_solver),
+                'kappa_win': config.default_kappa_win,
+                'kappa_seq': config.default_kappa_seq,
+                'severity_level': severity_level,
+            }
+
+        target_unlock = 2
+        max_ratio = 0.20
+        prompt_candidate_limit = 6
+        freeze_h_hours = 24
+        epsilon_solver = max(0.08, config.default_epsilon_solver)
+        kappa_scale = 1.0
+
+        if severity_level == 'medium':
+            target_unlock = 4
+            max_ratio = 0.38
+            prompt_candidate_limit = 8
+            freeze_h_hours = 16
+            epsilon_solver = max(0.10, config.default_epsilon_solver)
+            kappa_scale = 1.15
+        elif severity_level == 'high':
+            target_unlock = 6
+            max_ratio = 0.55
+            prompt_candidate_limit = 10
+            freeze_h_hours = 8
+            epsilon_solver = max(0.12, config.default_epsilon_solver)
+            kappa_scale = 1.35
+        elif severity_level == 'critical':
+            target_unlock = 8
+            max_ratio = 0.72
+            prompt_candidate_limit = 12
+            freeze_h_hours = 4
+            epsilon_solver = max(0.14, config.default_epsilon_solver)
+            kappa_scale = 1.55
+
+        max_unlock = min(
+            eligible_count,
+            max(target_unlock, int(round(eligible_count * max_ratio))),
+        )
+        target_unlock = min(target_unlock, max_unlock)
+        prompt_candidate_limit = min(
+            eligible_count,
+            max(prompt_candidate_limit, target_unlock),
+        )
+        freeze_h_slots = int(freeze_h_hours * 60 / config.slot_minutes)
+        return {
+            'target_unlock': target_unlock,
+            'max_unlock': max_unlock,
+            'prompt_candidate_limit': prompt_candidate_limit,
+            'freeze_h_slots': freeze_h_slots,
+            'freeze_h_hours': freeze_h_hours,
+            'epsilon_solver': min(0.18, epsilon_solver),
+            'kappa_win': round(config.default_kappa_win * kappa_scale, 2),
+            'kappa_seq': round(config.default_kappa_seq * kappa_scale, 2),
+            'severity_level': severity_level,
+        }
+
+    @staticmethod
+    def _select_prompt_candidate_ids(
+        trcg_dict: Dict[str, Any],
+        eligible_ids: Set[str],
+        repair_profile: Dict[str, Any],
+    ) -> List[str]:
+        """
+        Keep the prompt action space tightly aligned with the solver action
+        space. The model only needs the missions that are likely to matter for
+        the next local repair, not every active mission in the horizon.
+        """
+        eligible = set(eligible_ids or set())
+        if not eligible:
+            return []
+
+        limit = int(repair_profile.get('prompt_candidate_limit', 0) or 0)
+        if limit <= 0:
+            limit = min(len(eligible), 8)
+
+        degree: Dict[str, float] = {}
+        selected: List[str] = []
+        seen: Set[str] = set()
+
+        def _push(mid: str) -> None:
+            if mid in eligible and mid not in seen and len(selected) < limit:
+                selected.append(mid)
+                seen.add(mid)
+
+        conflicts = trcg_dict.get('top_conflicts', []) or []
+        for conflict in conflicts:
+            sev = float(conflict.get('severity', 0.0) or 0.0)
+            for mid in (
+                str(conflict.get('a', conflict.get('mission_a', '')) or ''),
+                str(conflict.get('b', conflict.get('mission_b', '')) or ''),
+            ):
+                if mid in eligible:
+                    degree[mid] = degree.get(mid, 0.0) + sev
+
+        for mid in sorted(degree.keys(), key=lambda x: (-degree[x], x)):
+            _push(mid)
+            if len(selected) >= limit:
+                return selected
+
+        clusters = trcg_dict.get('conflict_clusters', []) or []
+        for cluster in clusters:
+            members = sorted(
+                (
+                    str(mid) for mid in (cluster.get('members', []) or [])
+                    if str(mid) in eligible
+                ),
+            )
+            for mid in members:
+                _push(mid)
+                if len(selected) >= limit:
+                    return selected
+
+        urgents = trcg_dict.get('urgent_missions', []) or []
+        for item in sorted(
+            urgents,
+            key=lambda x: (
+                float(x.get('urgency_score', 9999.0) or 9999.0),
+                str(x.get('mission_id', '') or ''),
+            ),
+        ):
+            _push(str(item.get('mission_id', '') or ''))
+            if len(selected) >= limit:
+                return selected
+
+        for mid in sorted(eligible):
+            _push(mid)
+            if len(selected) >= limit:
+                break
+        return selected
 
     # ------------------------------------------------------------------
     # 方案 A: 条件跳过 LLM —— 无冲突 + 低压力时全锚定
@@ -710,19 +1024,19 @@ class TRCGRepairPolicy(BasePolicy):
         max_pressure = max(pressure.values(), default=0.0) if pressure else 0.0
         near_queue_n = sum(1 for c in conflicts if c.get('conflict_type') == 'near_queue')
 
-        target_unlock = 3
-        if max_pressure >= 0.90 or near_queue_n >= 6:
-            target_unlock = 5
-        elif max_pressure >= 0.80 or near_queue_n >= 4 or len(urgents) >= 3:
+        target_unlock = 2
+        max_ratio = 0.20
+        if max_pressure >= 0.98 or near_queue_n >= 7 or len(urgents) >= 5:
+            target_unlock = 8
+            max_ratio = 0.72
+        elif max_pressure >= 0.92 or near_queue_n >= 5 or len(urgents) >= 4:
+            target_unlock = 6
+            max_ratio = 0.55
+        elif max_pressure >= 0.80 or near_queue_n >= 3 or len(urgents) >= 3:
             target_unlock = 4
+            max_ratio = 0.38
 
-        max_ratio = 0.25
-        if max_pressure >= 0.85:
-            max_ratio = 0.35
-        elif max_pressure >= 0.75:
-            max_ratio = 0.30
-
-        max_unlock = max(target_unlock, int(eligible_count * max_ratio))
+        max_unlock = max(target_unlock, int(round(eligible_count * max_ratio)))
         max_unlock = min(max_unlock, eligible_count)
         target_unlock = min(target_unlock, eligible_count)
         return target_unlock, max_unlock
@@ -744,8 +1058,9 @@ class TRCGRepairPolicy(BasePolicy):
         self._skip_count += 1
 
         # 无冲突时仍给少量可动空间，避免因过度冻结导致 delay 积累。
-        freeze_h_slots = max(60, config.freeze_horizon)
-        epsilon_solver = min(0.08, max(0.0, config.default_epsilon_solver))
+        profile = self._build_repair_profile(trcg_dict, 0, config)
+        freeze_h_slots = max(60, int(profile['freeze_h_slots']))
+        epsilon_solver = min(0.10, float(profile['epsilon_solver']))
 
         urgent_ids: List[str] = []
         for u in sorted(
@@ -770,8 +1085,8 @@ class TRCGRepairPolicy(BasePolicy):
             freeze_horizon=freeze_h_slots,
             use_two_stage=True,
             epsilon_solver=epsilon_solver,
-            kappa_win=config.default_kappa_win,
-            kappa_seq=config.default_kappa_seq,
+            kappa_win=float(profile['kappa_win']),
+            kappa_seq=float(profile['kappa_seq']),
             # 无冲突但允许 1~2 个高紧急任务微调，抑制 delay 尾部风险。
             unlock_mission_ids=use_unlock,
             root_cause_mission_id=None,
@@ -836,7 +1151,11 @@ class TRCGRepairPolicy(BasePolicy):
         # conflicts
         conflicts = trcg_dict.get('top_conflicts', [])
         conflict_keys = sorted(
-            (c.get('mission_a', ''), c.get('mission_b', ''), c.get('resource', ''))
+            (
+                c.get('a', c.get('mission_a', '')),
+                c.get('b', c.get('mission_b', '')),
+                c.get('resource', ''),
+            )
             for c in conflicts
         ) if conflicts else []
 
@@ -886,14 +1205,17 @@ class TRCGRepairPolicy(BasePolicy):
         # ---- 扩展 unlock 集合（与 Step 6 逻辑一致：更严格的上限）----
         _unlock_set = set(valid_unlock)
         _eligible = active_mission_ids - started_mission_ids - completed_mission_ids
-        _target_unlock, _max_unlock = self._compute_unlock_budget(
-            trcg_dict, len(_eligible)
-        )
+        _profile = self._build_repair_profile(trcg_dict, len(_eligible), config)
+        _target_unlock = int(_profile['target_unlock'])
+        _max_unlock = int(_profile['max_unlock'])
 
         if len(_unlock_set) < _target_unlock:
             conflicts = trcg_dict.get('top_conflicts', [])
             for c in sorted(conflicts, key=lambda x: -float(x.get('severity', 0))):
-                for m in (c.get('a', ''), c.get('b', '')):
+                for m in (
+                    c.get('a', c.get('mission_a', '')),
+                    c.get('b', c.get('mission_b', '')),
+                ):
                     if m in _eligible and m not in _unlock_set and len(_unlock_set) < _max_unlock:
                         _unlock_set.add(m)
                 if len(_unlock_set) >= _target_unlock:
@@ -908,6 +1230,14 @@ class TRCGRepairPolicy(BasePolicy):
                 if len(_unlock_set) >= _target_unlock:
                     break
 
+        if len(_unlock_set) < _target_unlock:
+            for mid in sorted(_eligible):
+                if mid in _unlock_set:
+                    continue
+                _unlock_set.add(mid)
+                if len(_unlock_set) >= _target_unlock or len(_unlock_set) >= _max_unlock:
+                    break
+
         valid_unlock = sorted(_unlock_set)
 
         # 复用上次 LLM 的 root_cause 信息
@@ -919,22 +1249,11 @@ class TRCGRepairPolicy(BasePolicy):
                 root_cause = valid_unlock[0] if valid_unlock else None
 
         # freeze_horizon=96 slots (24h)，匹配 FT best_params
-        freeze_h_slots = max(96, config.freeze_horizon)
+        freeze_h_slots = int(_profile['freeze_h_slots'])
         # 自适应 epsilon（与 Step 5 逻辑一致）
         # selective freezing 已在 simulator 层保证低 drift，
         # epsilon 可适度放宽让 Stage 2 有更多 delay 预算优化未冻结 mission。
-        _conflicts = trcg_dict.get('top_conflicts', [])
-        _urgents = trcg_dict.get('urgent_missions', [])
-        _pressure = trcg_dict.get('bottleneck_pressure', {})
-        _max_p = max(_pressure.values(), default=0.0) if _pressure else 0.0
-        _base_eps = max(0.10, config.default_epsilon_solver)
-        if len(_conflicts) == 0 and len(_urgents) <= 1 and _max_p < 0.6:
-            _adaptive_eps = min(0.12, _base_eps + 0.02)
-        elif len(_conflicts) <= 2 and _max_p < 0.8:
-            _adaptive_eps = min(0.11, _base_eps + 0.01)
-        else:
-            _adaptive_eps = _base_eps
-        epsilon_solver = min(0.12, _adaptive_eps)
+        epsilon_solver = float(_profile['epsilon_solver'])
 
         # 始终使用锚点约束（空 = 全锚定，非空 = 仅解锁指定 mission）
         use_unlock = tuple(valid_unlock)
@@ -946,8 +1265,8 @@ class TRCGRepairPolicy(BasePolicy):
             freeze_horizon=freeze_h_slots,
             use_two_stage=True,
             epsilon_solver=epsilon_solver,
-            kappa_win=config.default_kappa_win,
-            kappa_seq=config.default_kappa_seq,
+            kappa_win=float(_profile['kappa_win']),
+            kappa_seq=float(_profile['kappa_seq']),
             unlock_mission_ids=use_unlock,
             root_cause_mission_id=root_cause,
             secondary_root_cause_mission_id=prev_decision.secondary_root_cause_mission_id,

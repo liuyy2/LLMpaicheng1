@@ -127,7 +127,8 @@ You are an expert rocket-launch scheduling advisor.
 
 Your ONLY job: given a Temporal-Resource Conflict Graph (TRCG) diagnostic \
 summary, identify the root cause of scheduling conflicts and decide the \
-MINIMAL set of missions to unlock for local repair (anchor fix-and-optimize).
+SMALLEST LOCALLY FEASIBLE set of missions to unlock for local repair \
+(anchor fix-and-optimize).
 
 You do NOT choose solver parameters (freeze, epsilon). Those are set by \
 a deterministic rule engine. You ONLY choose the repair anchor set.
@@ -171,6 +172,7 @@ increases schedule instability. Be precise and conservative.\
 def build_repair_user_prompt(
     trcg_dict: Dict[str, Any],
     active_mission_ids: List[str],
+    repair_profile: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     构建 user prompt，将 TRCGSummary + 候选 mission 列表注入模板。
@@ -182,12 +184,24 @@ def build_repair_user_prompt(
     """
     trcg_json = json.dumps(trcg_dict, ensure_ascii=False, separators=(',', ':'))
     ids_str = ', '.join(active_mission_ids)
+    repair_hint = ""
+    if repair_profile:
+        severity_level = str(repair_profile.get('severity_level', '') or '')
+        if severity_level:
+            repair_hint = (
+                f"Current repair pressure: {severity_level}. "
+                "Prefer the smallest repair set that directly resolves the bottleneck. "
+                "Start with 1-2 missions and only add more if the conflicts clearly form a tightly coupled cluster.\n\n"
+            )
 
     return (
         f"TRCG diagnostic summary (JSON):\n{trcg_json}\n\n"
-        f"Active (schedulable, not started/completed) missions: [{ids_str}]\n\n"
-        "unlock_mission_ids must be a SUBSET of the active missions above, "
-        "size 1–8, and must include root_cause_mission_id.\n\n"
+        f"ONLY these missions are legal output candidates: [{ids_str}]\n"
+        "Any mission not in this list is INVALID, even if it appears in the TRCG summary.\n\n"
+        f"{repair_hint}"
+        "unlock_mission_ids must be a SUBSET of the candidate list above, "
+        "size 1–8, and must include root_cause_mission_id.\n"
+        "Never output started/completed/non-active missions.\n\n"
         "Output the JSON now (4 keys only: root_cause_mission_id, "
         "unlock_mission_ids, secondary_root_cause_mission_id, analysis_short):"
     )
@@ -647,7 +661,31 @@ logger = logging.getLogger("repair_fallback")
 _FREEZE_STEP_DOWN: Dict[int, int] = {24: 16, 16: 8, 8: 4, 4: 0, 0: 0}
 
 # epsilon 升级序列：当前值 → 下一个更宽松值
-_EPSILON_STEP_UP: Dict[float, float] = {0.0: 0.02, 0.02: 0.05, 0.05: 0.10, 0.10: 0.10}
+_EPSILON_STEP_UP: Dict[float, float] = {
+    0.0: 0.02,
+    0.02: 0.05,
+    0.05: 0.10,
+    0.10: 0.12,
+    0.12: 0.15,
+    0.15: 0.18,
+    0.18: 0.18,
+}
+
+
+def _next_epsilon_step(current: float) -> float:
+    """
+    Move epsilon upward on a small discrete ladder. This keeps the search
+    predictable while still allowing high-pressure repairs to relax beyond
+    the old 0.10 ceiling.
+    """
+    current = round(float(current or 0.0), 2)
+    if current in _EPSILON_STEP_UP:
+        return _EPSILON_STEP_UP[current]
+    ordered = sorted(_EPSILON_STEP_UP.keys())
+    for key in ordered:
+        if current < key:
+            return _EPSILON_STEP_UP[key]
+    return ordered[-1]
 
 
 @dataclass
@@ -866,6 +904,7 @@ def solve_with_fallback_chain(
     cur_unlock = list(decision.unlock_mission_ids)
     cur_freeze_h = decision.freeze_horizon_hours
     cur_epsilon = decision.epsilon_solver
+    cur_frozen_ops = frozen_ops
 
     result, attempt = _solve_once('initial', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True)
     attempts.append(attempt)
@@ -894,8 +933,16 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
+    wide_unlock_cap = min(
+        len(eligible_ids),
+        max(12, int(round(len(eligible_ids) * 0.60))),
+    )
     cur_unlock = _expand_unlock_from_conflicts(
-        cur_unlock, trcg_dict, eligible_ids, expand_count=4, max_unlock=12
+        cur_unlock,
+        trcg_dict,
+        eligible_ids,
+        expand_count=max(4, wide_unlock_cap - len(cur_unlock)),
+        max_unlock=wide_unlock_cap,
     )
     result, attempt = _solve_once(
         'attempt1b_expand_unlock_wide', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True
@@ -910,12 +957,36 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
+    surge_unlock_cap = min(
+        len(eligible_ids),
+        max(wide_unlock_cap, int(round(len(eligible_ids) * 0.85))),
+    )
+    cur_unlock = _expand_unlock_from_conflicts(
+        cur_unlock,
+        trcg_dict,
+        eligible_ids,
+        expand_count=max(6, surge_unlock_cap - len(cur_unlock)),
+        max_unlock=surge_unlock_cap,
+    )
+    result, attempt = _solve_once(
+        'attempt1c_expand_unlock_surge', cur_unlock, cur_freeze_h, cur_epsilon, use_anchor=True
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt1c_expand_unlock_surge',
+            total_solver_calls=total_calls,
+        )
+
     new_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, 0)
     if new_freeze_h == cur_freeze_h:
         new_freeze_h = 0
 
     new_freeze_slots = FREEZE_HOURS_TO_SLOTS.get(new_freeze_h, 0)
-    recomputed_frozen = frozen_ops
+    recomputed_frozen = cur_frozen_ops
     if (
         current_plan_for_refreeze is not None
         and new_freeze_slots != FREEZE_HOURS_TO_SLOTS.get(cur_freeze_h, 0)
@@ -929,13 +1000,14 @@ def solve_with_fallback_chain(
         )
 
     cur_freeze_h = new_freeze_h
+    cur_frozen_ops = recomputed_frozen
     result, attempt = _solve_once(
         'attempt2_reduce_freeze',
         cur_unlock,
         cur_freeze_h,
         cur_epsilon,
         use_anchor=True,
-        frozen_ops_override=recomputed_frozen,
+        frozen_ops_override=cur_frozen_ops,
     )
     attempts.append(attempt)
     if _is_success(result.status):
@@ -949,7 +1021,7 @@ def solve_with_fallback_chain(
 
     deep_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, 0)
     if deep_freeze_h < cur_freeze_h:
-        deep_frozen = recomputed_frozen
+        deep_frozen = cur_frozen_ops
         if current_plan_for_refreeze is not None:
             deep_slots = FREEZE_HOURS_TO_SLOTS.get(deep_freeze_h, 0)
             deep_frozen = compute_frozen_ops_fn(
@@ -960,14 +1032,14 @@ def solve_with_fallback_chain(
                 completed_ops,
             )
         cur_freeze_h = deep_freeze_h
-        recomputed_frozen = deep_frozen
+        cur_frozen_ops = deep_frozen
         result, attempt = _solve_once(
             'attempt2b_reduce_freeze_deep',
             cur_unlock,
             cur_freeze_h,
             cur_epsilon,
             use_anchor=True,
-            frozen_ops_override=recomputed_frozen,
+            frozen_ops_override=cur_frozen_ops,
         )
         attempts.append(attempt)
         if _is_success(result.status):
@@ -979,14 +1051,14 @@ def solve_with_fallback_chain(
                 total_solver_calls=total_calls,
             )
 
-    cur_epsilon = _EPSILON_STEP_UP.get(cur_epsilon, 0.10)
+    cur_epsilon = max(_next_epsilon_step(cur_epsilon), 0.12)
     result, attempt = _solve_once(
         'attempt3_relax_epsilon',
         cur_unlock,
         cur_freeze_h,
         cur_epsilon,
         use_anchor=True,
-        frozen_ops_override=recomputed_frozen,
+        frozen_ops_override=cur_frozen_ops,
     )
     attempts.append(attempt)
     if _is_success(result.status):
@@ -998,7 +1070,26 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
-    wide_target = max(12, int(len(eligible_ids) * 0.45))
+    cur_epsilon = max(cur_epsilon, 0.16)
+    result, attempt = _solve_once(
+        'attempt3a_relax_epsilon_deep',
+        cur_unlock,
+        cur_freeze_h,
+        cur_epsilon,
+        use_anchor=True,
+        frozen_ops_override=cur_frozen_ops,
+    )
+    attempts.append(attempt)
+    if _is_success(result.status):
+        return FallbackChainResult(
+            solver_result=result,
+            success=True,
+            attempts=attempts,
+            final_attempt_name='attempt3a_relax_epsilon_deep',
+            total_solver_calls=total_calls,
+        )
+
+    wide_target = max(12, int(round(len(eligible_ids) * 0.75)))
     wide_target = min(max(8, wide_target), max(8, len(eligible_ids)))
     cur_unlock = _expand_unlock_from_conflicts(
         cur_unlock,
@@ -1010,7 +1101,7 @@ def solve_with_fallback_chain(
     relaxed_freeze_h = _FREEZE_STEP_DOWN.get(cur_freeze_h, cur_freeze_h)
     if relaxed_freeze_h < cur_freeze_h and current_plan_for_refreeze is not None:
         relaxed_slots = FREEZE_HOURS_TO_SLOTS.get(relaxed_freeze_h, 0)
-        recomputed_frozen = compute_frozen_ops_fn(
+        cur_frozen_ops = compute_frozen_ops_fn(
             current_plan_for_refreeze,
             now,
             relaxed_slots,
@@ -1018,14 +1109,14 @@ def solve_with_fallback_chain(
             completed_ops,
         )
         cur_freeze_h = relaxed_freeze_h
-    cur_epsilon = max(cur_epsilon, 0.12)
+    cur_epsilon = max(cur_epsilon, 0.16)
     result, attempt = _solve_once(
         'attempt3b_wide_unlock_relaxed',
         cur_unlock,
         cur_freeze_h,
         cur_epsilon,
         use_anchor=True,
-        frozen_ops_override=recomputed_frozen,
+        frozen_ops_override=cur_frozen_ops,
     )
     attempts.append(attempt)
     if _is_success(result.status):
@@ -1037,7 +1128,7 @@ def solve_with_fallback_chain(
             total_solver_calls=total_calls,
         )
 
-    partial_target = max(len(cur_unlock), int(len(eligible_ids) * 0.70))
+    partial_target = max(len(cur_unlock), int(round(len(eligible_ids) * 0.92)))
     partial_target = min(max(10, partial_target), max(10, len(eligible_ids)))
     cur_unlock = _expand_unlock_from_conflicts(
         cur_unlock,
@@ -1046,14 +1137,14 @@ def solve_with_fallback_chain(
         expand_count=max(6, partial_target - len(cur_unlock)),
         max_unlock=partial_target,
     )
-    cur_epsilon = max(cur_epsilon, 0.12)
+    cur_epsilon = max(cur_epsilon, 0.18)
     result, attempt = _solve_once(
         'attempt3c_partial_global_anchor',
         cur_unlock,
         cur_freeze_h,
         cur_epsilon,
         use_anchor=True,
-        frozen_ops_override=recomputed_frozen,
+        frozen_ops_override=cur_frozen_ops,
     )
     attempts.append(attempt)
     if _is_success(result.status):
@@ -1067,7 +1158,8 @@ def solve_with_fallback_chain(
 
     logger.warning('fallback_chain: all attempts failed, falling back to graceful global replan')
 
-    original_freeze_slots = FREEZE_HOURS_TO_SLOTS.get(decision.freeze_horizon_hours, 0)
+    final_freeze_h = cur_freeze_h
+    original_freeze_slots = FREEZE_HOURS_TO_SLOTS.get(final_freeze_h, 0)
     global_frozen = compute_frozen_ops_fn(
         current_plan_for_refreeze,
         now,
@@ -1079,9 +1171,9 @@ def solve_with_fallback_chain(
     result, attempt = _solve_once(
         'final_global_replan',
         sorted(eligible_ids),
-        decision.freeze_horizon_hours,
-        max(0.06, min(0.09, cur_epsilon)),
-        use_anchor=True,
+        final_freeze_h,
+        max(0.10, min(0.18, cur_epsilon)),
+        use_anchor=False,
         frozen_ops_override=global_frozen,
     )
     attempts.append(attempt)

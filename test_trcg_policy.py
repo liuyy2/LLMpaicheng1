@@ -25,6 +25,7 @@ from policies import (
     FixedWeightPolicy, TRCGRepairPolicy,
     create_policy, AVAILABLE_POLICIES,
 )
+from policies.policy_llm_repair import build_repair_user_prompt
 
 
 def test_1_metaparams_backward_compat():
@@ -222,6 +223,47 @@ def test_6_snapshot_serialization():
     print("  PASS")
 
 
+def test_7_adaptive_repair_profile_and_prompt_candidates():
+    """高压冲突下应扩大 repair budget，并收窄 prompt 候选空间。"""
+    print("\n=== Test 7: adaptive repair profile + prompt candidates ===")
+    policy = TRCGRepairPolicy(policy_name="trcg_profile")
+    config = DEFAULT_CONFIG
+    trcg_dict = {
+        "top_conflicts": [
+            {"a": "M001", "b": "M002", "resource": "R_pad", "conflict_type": "near_queue", "severity": 8.5},
+            {"a": "M002", "b": "M003", "resource": "R3", "conflict_type": "near_queue", "severity": 7.9},
+            {"a": "M003", "b": "M004", "resource": "R_pad", "conflict_type": "near_queue", "severity": 7.4},
+            {"a": "M004", "b": "M005", "resource": "R3", "conflict_type": "near_queue", "severity": 7.1},
+        ],
+        "conflict_clusters": [
+            {"center_mission_id": "M002", "members": ["M001", "M002", "M003", "M004", "M005"]},
+        ],
+        "urgent_missions": [
+            {"mission_id": "M001", "urgency_score": 10.0},
+            {"mission_id": "M003", "urgency_score": 12.0},
+            {"mission_id": "M005", "urgency_score": 15.0},
+            {"mission_id": "M006", "urgency_score": 18.0},
+        ],
+        "bottleneck_pressure": {"pad_util": 0.97, "r3_util": 0.95},
+    }
+    eligible = {"M001", "M002", "M003", "M004", "M005", "M006", "M007", "M008"}
+
+    profile = policy._build_repair_profile(trcg_dict, len(eligible), config)
+    candidates = policy._select_prompt_candidate_ids(trcg_dict, eligible, profile)
+    prompt = build_repair_user_prompt(trcg_dict, candidates, repair_profile=profile)
+
+    assert profile["severity_level"] in ("high", "critical")
+    assert profile["target_unlock"] >= 3
+    assert profile["freeze_h_slots"] >= 96
+    assert profile["epsilon_solver"] <= 0.10
+    assert len(candidates) <= profile["prompt_candidate_limit"]
+    assert set(candidates).issubset(eligible)
+    assert "Current repair pressure:" in prompt
+    print(f"  profile={profile}")
+    print(f"  candidates={candidates}")
+    print("  PASS")
+
+
 if __name__ == "__main__":
     test_1_metaparams_backward_compat()
     test_2_decide_returns_correct_meta()
@@ -229,6 +271,7 @@ if __name__ == "__main__":
     test_4_compare_with_fixed()
     test_5_create_policy_registry()
     test_6_snapshot_serialization()
+    test_7_adaptive_repair_profile_and_prompt_candidates()
     print("\n" + "="*60)
-    print(" All 6 tests PASSED ")
+    print(" All 7 tests PASSED ")
     print("="*60)
